@@ -70,7 +70,7 @@ jobs:
       - name: Package Payload and zip into .ipa
         working-directory: ios
         run: |
-          APP_PATH=$(find build/Build/Products -maxdepth 1 -iname "*.app" -type d | head -n 1)
+          APP_PATH=$(find build/Build/Products -iname "*.app" -type d | head -n 1)
           if [ -z "$APP_PATH" ]; then
             echo "No .app bundle found — build likely failed."
             exit 1
