@@ -1,26 +1,80 @@
-name: Build Expo iOS
+name: Build Unsigned IPA (AltStore)
+
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-unsigned-ipa:
+    runs-on: macos-14
+    timeout-minutes: 60
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
+          cache: npm
 
-      - name: Install Project Dependencies
-        run: npm install
+      - name: Install JS dependencies
+        run: npm ci
 
-      - name: Install EAS CLI
-        run: npm install -g eas-cli@latest
+      - name: Prebuild native iOS project
+        run: npx expo prebuild --platform ios --clean --non-interactive
 
-      - name: Build with EAS
-        run: eas build --platform ios --profile development --non-interactive
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: Detect Xcode scheme
+        id: scheme
+        working-directory: ios
+        run: |
+          WORKSPACE=$(ls | grep .xcworkspace | head -n 1)
+          SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | \
+            ruby -rjson -e 'puts JSON.parse(STDIN.read)["workspace"]["schemes"].reject { |s| s.include?("Pods") }.first')
+          echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
+          echo "name=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Detected workspace: $WORKSPACE, scheme: $SCHEME"
+
+      - name: Build unsigned .app (device architecture, no signing)
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -workspace "${{ steps.scheme.outputs.workspace }}" \
+            -scheme "${{ steps.scheme.outputs.name }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            clean build
+
+      - name: Package Payload and zip into .ipa
+        working-directory: ios
+        run: |
+          APP_PATH=$(find build/Build/Products -maxdepth 1 -iname "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found — build likely failed."
+            exit 1
+          fi
+          echo "Found app bundle: $APP_PATH"
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          zip -r -y app-unsigned.ipa Payload
+          mkdir -p ../artifact-output
+          mv app-unsigned.ipa ../artifact-output/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unsigned-ipa
+          path: artifact-output/app-unsigned.ipa
+          retention-days: 14

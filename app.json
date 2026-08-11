@@ -12,7 +12,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.omartamer.mycarapp",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSBluetoothAlwaysUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
+        "NSBluetoothPeripheralUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth."
       }
     },
     "android": {
@@ -54,9 +56,10 @@
         {
           "isBackgroundEnabled": false,
           "modes": [
+            "peripheral",
             "central"
           ],
-          "bluetoothAlwaysPermission": "يحتاج التطبيق لصلاحية البلوتوث للاتصال بقطعة فحص السيارة ARC 103."
+          "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to your ARC 103 device"
         }
       ]
     ],
