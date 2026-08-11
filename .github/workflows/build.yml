@@ -124,7 +124,11 @@ jobs:
           echo "Found app bundle: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          zip -r -y app-unsigned.ipa Payload
+          # Use ditto instead of zip: zip can mangle resource forks / extended
+          # attributes on macOS runners, which produces an .ipa whose Info.plist
+          # AltServer can't parse (NSCocoaErrorDomain 3840). ditto is what Apple's
+          # own tooling uses to package .app bundles and avoids that corruption.
+          ditto -c -k --sequesterRsrc --keepParent Payload app-unsigned.ipa
           mkdir -p ../artifact-output
           mv app-unsigned.ipa ../artifact-output/
 
