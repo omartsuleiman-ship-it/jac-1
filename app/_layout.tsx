@@ -1,9 +1,9 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import * as Notifications from 'expo-notifications';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
 import { useEffect } from 'react';
-import * as Notifications from 'expo-notifications';
+import 'react-native-reanimated';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
@@ -14,7 +14,7 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
-  // Set notification handler with sound enabled
+  // Set notification handler with sound
   useEffect(() => {
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
@@ -23,6 +23,21 @@ export default function RootLayout() {
         shouldSetBadge: false,
       }),
     });
+
+    // Request permissions with sound (required for iOS)
+    const requestPermissions = async () => {
+      const { status } = await Notifications.requestPermissionsAsync({
+        ios: {
+          allowSound: true,
+          allowAlert: true,
+          allowBadge: true,
+        },
+      });
+      if (status !== 'granted') {
+        console.warn('Notification permissions not granted');
+      }
+    };
+    requestPermissions();
   }, []);
 
   return (
