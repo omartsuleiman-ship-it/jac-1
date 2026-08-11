@@ -1,6 +1,6 @@
 // diagnostics.tsx
 import Ionicons from '@expo/vector-icons/Ionicons';
-import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -14,9 +14,9 @@ import {
   View,
 } from 'react-native';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
+import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
-import { getDTCs, getLiveData, getReadiness, getMisfireCounters } from '../services/bleService';
 
 // -----------------------------------------------------------------------------
 // Constants & Types
@@ -81,14 +81,21 @@ export default function DiagnosticsScreen() {
   const [faults, setFaults] = useState<FaultItem[] | null>(null);
   const scanIdRef = useRef(0);
 
-  // --- LIVE DATA state ---
-  const [liveData, setLiveData] = useState({
-    rpm: 0,
-    coolant: 0,
-    voltage: 0,
-    maf: 0,
-    o2: 0,
-    fuelTrim: 0,
+  // --- LIVE DATA state (initialised to null) ---
+  const [liveData, setLiveData] = useState<{
+    rpm: number | null;
+    coolant: number | null;
+    voltage: number | null;
+    maf: number | null;
+    o2: number | null;
+    fuelTrim: number | null;
+  }>({
+    rpm: null,
+    coolant: null,
+    voltage: null,
+    maf: null,
+    o2: null,
+    fuelTrim: null,
   });
   const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
 
@@ -110,6 +117,11 @@ export default function DiagnosticsScreen() {
     immediateGuidance: '',
     steps: [],
   });
+
+  // --- Connection state ---
+  const connected = isConnected();
+  const statusColor = connected ? COLORS.success : COLORS.textTertiary;
+  const statusText = connected ? (isAr ? 'متصل' : 'Connected') : (isAr ? 'غير متصل' : 'Disconnected');
 
   // ---------------------------------------------------------------------------
   // DTC Scan (Mode 03)
@@ -134,9 +146,7 @@ export default function DiagnosticsScreen() {
     setFaults(null);
 
     try {
-      // Real OBD Mode 03
       const codes = await getDTCs();
-
       if (scanIdRef.current !== thisScan) return;
 
       const initialFaults: FaultItem[] = codes.map((code) => {
@@ -148,8 +158,6 @@ export default function DiagnosticsScreen() {
       });
 
       setFaults(initialFaults);
-
-      // Only trigger AI for codes not in local DB
       initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, thisScan));
     } catch (error) {
       console.error('Scan failed:', error);
@@ -185,8 +193,8 @@ export default function DiagnosticsScreen() {
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
     if (activeView === 'LIVE_DATA') {
-      fetchLiveData(); // immediate first fetch
-      interval = setInterval(fetchLiveData, 1000); // update every second
+      fetchLiveData();
+      interval = setInterval(fetchLiveData, 1000);
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -194,7 +202,7 @@ export default function DiagnosticsScreen() {
   }, [activeView, fetchLiveData]);
 
   // ---------------------------------------------------------------------------
-  // Readiness & Misfire Counters (Mode 01 PID 01 & Mode $06)
+  // Readiness & Misfire Counters
   // ---------------------------------------------------------------------------
   const fetchReadiness = useCallback(async () => {
     setIsReadinessLoading(true);
@@ -212,7 +220,6 @@ export default function DiagnosticsScreen() {
     }
   }, []);
 
-  // Fetch readiness when the tab becomes active
   useEffect(() => {
     if (activeView === 'READINESS') {
       fetchReadiness();
@@ -260,6 +267,9 @@ export default function DiagnosticsScreen() {
   const faultCount = faults?.length ?? 0;
   const stopCount = useMemo(() => faults?.filter((f) => f.urgency === 'STOP').length ?? 0, [faults]);
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={[styles.header, { flexDirection: dir }]}>
@@ -267,8 +277,8 @@ export default function DiagnosticsScreen() {
           {isAr ? 'تشخيص أعطال OBD-II' : 'OBD-II Diagnostics'}
         </Text>
         <View style={[styles.connectionStatus, { flexDirection: dir }]}>
-          <View style={styles.statusDot} />
-          <Text style={styles.statusText}>ARC 103 · {isAr ? 'متصل' : 'Connected'}</Text>
+          <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+          <Text style={[styles.statusText, { color: statusColor }]}>ARC 103 · {statusText}</Text>
         </View>
       </View>
 
@@ -350,68 +360,73 @@ export default function DiagnosticsScreen() {
           <View style={styles.liveGrid}>
             <LiveCard
               icon="battery-charging-outline"
-              tone={liveData.voltage > 12.5 ? 'success' : 'warning'}
-              value={liveData.voltage.toFixed(1)}
+              tone={liveData.voltage !== null && liveData.voltage > 12.5 ? 'success' : 'warning'}
+              value={liveData.voltage !== null ? liveData.voltage.toFixed(1) : '--'}
               unit="V"
               labelEn="Battery Voltage"
               labelAr="جهد البطارية"
-              statusEn={liveData.voltage > 12.5 ? 'Normal' : 'Check'}
-              statusAr={liveData.voltage > 12.5 ? 'طبيعي' : 'فحص'}
+              statusEn={liveData.voltage !== null && liveData.voltage > 12.5 ? 'Normal' : 'Check'}
+              statusAr={liveData.voltage !== null && liveData.voltage > 12.5 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.voltage === null}
             />
             <LiveCard
               icon="thermometer-outline"
-              tone={liveData.coolant < 100 ? 'success' : 'warning'}
-              value={liveData.coolant.toFixed(0)}
+              tone={liveData.coolant !== null && liveData.coolant < 100 ? 'success' : 'warning'}
+              value={liveData.coolant !== null ? liveData.coolant.toFixed(0) : '--'}
               unit="°C"
               labelEn="Coolant Temp"
               labelAr="حرارة المحرك"
-              statusEn={liveData.coolant < 100 ? 'Normal' : 'High'}
-              statusAr={liveData.coolant < 100 ? 'طبيعي' : 'مرتفع'}
+              statusEn={liveData.coolant !== null && liveData.coolant < 100 ? 'Normal' : 'High'}
+              statusAr={liveData.coolant !== null && liveData.coolant < 100 ? 'طبيعي' : 'مرتفع'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.coolant === null}
             />
             <LiveCard
               icon="speedometer-outline"
-              tone="accent"
-              value={liveData.rpm.toFixed(0)}
+              tone={liveData.rpm !== null ? 'success' : 'warning'}
+              value={liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
               unit="RPM"
               labelEn="Engine Speed"
               labelAr="سرعة المحرك"
-              statusEn="Normal"
-              statusAr="طبيعي"
+              statusEn={liveData.rpm !== null ? 'Normal' : '--'}
+              statusAr={liveData.rpm !== null ? 'طبيعي' : '--'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.rpm === null}
             />
             <LiveCard
               icon="flash-outline"
-              tone="accent"
-              value={liveData.maf.toFixed(1)}
+              tone={liveData.maf !== null ? 'success' : 'warning'}
+              value={liveData.maf !== null ? liveData.maf.toFixed(1) : '--'}
               unit="g/s"
               labelEn="MAF Air Flow"
               labelAr="تدفق الهواء"
-              statusEn="Normal"
-              statusAr="طبيعي"
+              statusEn={liveData.maf !== null ? 'Normal' : '--'}
+              statusAr={liveData.maf !== null ? 'طبيعي' : '--'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.maf === null}
             />
             <LiveCard
               icon="analytics-outline"
-              tone={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'success' : 'warning'}
-              value={liveData.o2.toFixed(2)}
+              tone={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'success' : 'warning'}
+              value={liveData.o2 !== null ? liveData.o2.toFixed(2) : '--'}
               unit="V"
               labelEn="O2 Sensor"
               labelAr="حساس الأكسجين"
-              statusEn={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'Normal' : 'Check'}
-              statusAr={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'طبيعي' : 'فحص'}
+              statusEn={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'Normal' : 'Check'}
+              statusAr={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.o2 === null}
               onPress={() =>
                 openSensorAdvice(
                   'O2 Sensor — Checking',
@@ -433,16 +448,17 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="options-outline"
-              tone={Math.abs(liveData.fuelTrim) < 5 ? 'success' : 'warning'}
-              value={liveData.fuelTrim.toFixed(1)}
+              tone={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'success' : 'warning'}
+              value={liveData.fuelTrim !== null ? liveData.fuelTrim.toFixed(1) : '--'}
               unit="%"
               labelEn="Fuel Trim"
               labelAr="ضبط الوقود"
-              statusEn={Math.abs(liveData.fuelTrim) < 5 ? 'Normal' : 'Check'}
-              statusAr={Math.abs(liveData.fuelTrim) < 5 ? 'طبيعي' : 'فحص'}
+              statusEn={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'Normal' : 'Check'}
+              statusAr={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
+              isWaiting={liveData.fuelTrim === null}
             />
           </View>
         )}
@@ -512,7 +528,7 @@ export default function DiagnosticsScreen() {
             ) : misfireCounters ? (
               <View style={styles.misfireGrid}>
                 {misfireCounters.map((m) => {
-                  const pass = m.count <= 2; // threshold
+                  const pass = m.count <= 2;
                   const pct = Math.min(100, (m.count / 6) * 100);
                   return (
                     <View key={m.cylinder} style={styles.misfireCard}>
@@ -570,7 +586,7 @@ export default function DiagnosticsScreen() {
 }
 
 // -----------------------------------------------------------------------------
-// Sub‑components (unchanged)
+// Sub‑components
 // -----------------------------------------------------------------------------
 
 function SegmentedTabs({
@@ -726,6 +742,7 @@ function LiveCard({
   dir,
   onPress,
   isLoading = false,
+  isWaiting = false,
 }: {
   icon: any;
   tone: 'success' | 'warning' | 'accent';
@@ -739,9 +756,22 @@ function LiveCard({
   dir: 'row' | 'row-reverse';
   onPress?: () => void;
   isLoading?: boolean;
+  isWaiting?: boolean;
 }) {
-  const color = tone === 'success' ? COLORS.success : tone === 'warning' ? COLORS.warning : COLORS.accent;
-  const dimColor = tone === 'success' ? COLORS.successDim : tone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
+  // Determine the actual tone to display (waiting overrides to neutral)
+  const displayTone = isWaiting ? 'warning' : tone;
+  const color = displayTone === 'success' ? COLORS.success : displayTone === 'warning' ? COLORS.warning : COLORS.accent;
+  const dimColor = displayTone === 'success' ? COLORS.successDim : displayTone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
+
+  // Determine status text to show
+  let displayStatusEn = statusEn;
+  let displayStatusAr = statusAr;
+  let displayColor = color;
+  if (isWaiting) {
+    displayStatusEn = 'Waiting...';
+    displayStatusAr = 'بانتظار...';
+    displayColor = COLORS.textTertiary;
+  }
 
   const CardInner = (
     <>
@@ -749,20 +779,20 @@ function LiveCard({
         <View style={styles.liveIconWrap}>
           <Ionicons name={icon} size={18} color={color} />
         </View>
-        <View style={[styles.statusBadge, { backgroundColor: dimColor, flexDirection: dir }]}>
-          <View style={[styles.miniDot, { backgroundColor: color }]} />
-          <Text style={[styles.statusBadgeText, { color }]}>{isAr ? statusAr : statusEn}</Text>
+        <View style={[styles.statusBadge, { backgroundColor: isWaiting ? 'rgba(255,255,255,0.06)' : dimColor, flexDirection: dir }]}>
+          <View style={[styles.miniDot, { backgroundColor: displayColor }]} />
+          <Text style={[styles.statusBadgeText, { color: displayColor }]}>{isAr ? displayStatusAr : displayStatusEn}</Text>
         </View>
       </View>
       {isLoading ? (
         <ActivityIndicator color={color} style={{ marginVertical: 8 }} />
       ) : (
-        <Text style={[styles.liveValue, { textAlign: isAr ? 'right' : 'left', color: color }]}>
+        <Text style={[styles.liveValue, { textAlign: isAr ? 'right' : 'left', color: isWaiting ? COLORS.textSecondary : color }]}>
           {value} <Text style={styles.liveUnit}>{unit}</Text>
         </Text>
       )}
       <Text style={[styles.liveLabel, { textAlign: isAr ? 'right' : 'left' }]}>{isAr ? labelAr : labelEn}</Text>
-      {!isLoading && onPress && (
+      {!isLoading && !isWaiting && onPress && (
         <View style={[styles.liveCardHint, { flexDirection: dir }]}>
           <Ionicons name="information-circle-outline" size={12} color={COLORS.textTertiary} />
           <Text style={styles.liveCardHintText}>{isAr ? 'اضغط للتفاصيل' : 'Tap for details'}</Text>
@@ -771,7 +801,7 @@ function LiveCard({
     </>
   );
 
-  if (onPress && !isLoading) {
+  if (onPress && !isLoading && !isWaiting) {
     return (
       <TouchableOpacity style={[styles.liveCard, styles.liveCardTappable]} onPress={onPress} activeOpacity={0.8}>
         {CardInner}
@@ -901,8 +931,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(0, 230, 118, 0.25)',
   },
-  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.success },
-  statusText: { color: COLORS.success, fontSize: 11, fontWeight: '700' },
+  statusDot: { width: 7, height: 7, borderRadius: 4 },
+  statusText: { fontSize: 11, fontWeight: '700' },
 
   segmentWrap: {
     marginHorizontal: 16,
