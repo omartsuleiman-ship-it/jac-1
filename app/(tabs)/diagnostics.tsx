@@ -16,73 +16,7 @@ import {
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
-
-// -----------------------------------------------------------------------------
-// OBD Service – replace with actual Bluetooth implementation
-// -----------------------------------------------------------------------------
-// This service abstracts all OBD requests. The mock implementations below
-// generate dynamic data on the fly and should be swapped with real calls to
-// the Bluetooth adapter (e.g., via a native module or WebSocket).
-export interface OBDService {
-  getDTCs(): Promise<string[]>;                               // Mode 03
-  getLiveData(): Promise<{
-    rpm: number;
-    coolant: number;          // °C
-    voltage: number;          // V
-    maf: number;              // g/s
-    o2: number;               // V
-    fuelTrim: number;         // %
-  }>;
-  getReadiness(): Promise<{
-    misfire: boolean;
-    fuel: boolean;
-    catalyst: boolean;
-    evap: boolean;
-    o2sensor: boolean;
-  }>;                                                         // Mode 01 PID 01
-  getMisfireCounters(): Promise<{ cylinder: number; count: number }[]>; // Mode $06
-}
-
-// Temporary mock service – replace with real Bluetooth calls
-const obdService: OBDService = {
-  getDTCs: async (): Promise<string[]> => {
-    // Simulate OBD Mode 03 response: return a random subset of possible codes,
-    // sometimes empty to test the "No Faults" state.
-    const possible = ['P0300', 'P0301', 'P0171', 'P0420', 'P0217', 'P0562', 'P245A', 'P1CDA'];
-    const count = Math.floor(Math.random() * 4); // 0‑3 codes
-    return possible.slice(0, count);
-  },
-  getLiveData: async () => {
-    // Simulate Mode 01 PIDs with realistic fluctuations.
-    return {
-      rpm: 750 + Math.random() * 200,
-      coolant: 80 + Math.random() * 20,
-      voltage: 13.5 + Math.random() * 1.0,
-      maf: 10 + Math.random() * 10,
-      o2: 0.4 + Math.random() * 0.5,
-      fuelTrim: -3 + Math.random() * 6,
-    };
-  },
-  getReadiness: async () => {
-    // Mode 01 PID 01 – monitor status since DTCs cleared.
-    return {
-      misfire: true,
-      fuel: true,
-      catalyst: true,
-      evap: Math.random() > 0.5,
-      o2sensor: true,
-    };
-  },
-  getMisfireCounters: async () => {
-    // Mode $06 – misfire counts per cylinder (simulated).
-    return [
-      { cylinder: 1, count: Math.floor(Math.random() * 3) },
-      { cylinder: 2, count: Math.floor(Math.random() * 3) },
-      { cylinder: 3, count: Math.floor(Math.random() * 6) },
-      { cylinder: 4, count: Math.floor(Math.random() * 3) },
-    ];
-  },
-};
+import { getDTCs, getLiveData, getReadiness, getMisfireCounters } from '../services/bleService';
 
 // -----------------------------------------------------------------------------
 // Constants & Types
@@ -200,10 +134,9 @@ export default function DiagnosticsScreen() {
     setFaults(null);
 
     try {
-      // Replace with actual Bluetooth call: obdService.getDTCs()
-      const codes = await obdService.getDTCs();
+      // Real OBD Mode 03
+      const codes = await getDTCs();
 
-      // If a newer scan started while we were waiting, discard results.
       if (scanIdRef.current !== thisScan) return;
 
       const initialFaults: FaultItem[] = codes.map((code) => {
@@ -216,7 +149,7 @@ export default function DiagnosticsScreen() {
 
       setFaults(initialFaults);
 
-      // Fire AI resolution for codes not found locally
+      // Only trigger AI for codes not in local DB
       initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, thisScan));
     } catch (error) {
       console.error('Scan failed:', error);
@@ -239,8 +172,7 @@ export default function DiagnosticsScreen() {
   const fetchLiveData = useCallback(async () => {
     setIsLiveDataLoading(true);
     try {
-      // Replace with actual Bluetooth call: obdService.getLiveData()
-      const data = await obdService.getLiveData();
+      const data = await getLiveData();
       setLiveData(data);
     } catch (error) {
       console.warn('Failed to fetch live data:', error);
@@ -267,10 +199,9 @@ export default function DiagnosticsScreen() {
   const fetchReadiness = useCallback(async () => {
     setIsReadinessLoading(true);
     try {
-      // Replace with actual Bluetooth calls
       const [read, misfire] = await Promise.all([
-        obdService.getReadiness(),
-        obdService.getMisfireCounters(),
+        getReadiness(),
+        getMisfireCounters(),
       ]);
       setReadiness(read);
       setMisfireCounters(misfire);
@@ -639,7 +570,7 @@ export default function DiagnosticsScreen() {
 }
 
 // -----------------------------------------------------------------------------
-// Sub‑components (unchanged except for optional isLoading prop)
+// Sub‑components (unchanged)
 // -----------------------------------------------------------------------------
 
 function SegmentedTabs({
