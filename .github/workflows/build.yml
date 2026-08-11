@@ -53,6 +53,7 @@ jobs:
         id: build
         working-directory: ios
         run: |
+          set -o pipefail
           xcodebuild \
             -workspace "${{ steps.scheme.outputs.workspace }}" \
             -scheme "${{ steps.scheme.outputs.name }}" \
