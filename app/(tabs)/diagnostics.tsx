@@ -1,5 +1,6 @@
+// diagnostics.tsx
 import Ionicons from '@expo/vector-icons/Ionicons';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -16,6 +17,76 @@ import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constant
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
+// -----------------------------------------------------------------------------
+// OBD Service – replace with actual Bluetooth implementation
+// -----------------------------------------------------------------------------
+// This service abstracts all OBD requests. The mock implementations below
+// generate dynamic data on the fly and should be swapped with real calls to
+// the Bluetooth adapter (e.g., via a native module or WebSocket).
+export interface OBDService {
+  getDTCs(): Promise<string[]>;                               // Mode 03
+  getLiveData(): Promise<{
+    rpm: number;
+    coolant: number;          // °C
+    voltage: number;          // V
+    maf: number;              // g/s
+    o2: number;               // V
+    fuelTrim: number;         // %
+  }>;
+  getReadiness(): Promise<{
+    misfire: boolean;
+    fuel: boolean;
+    catalyst: boolean;
+    evap: boolean;
+    o2sensor: boolean;
+  }>;                                                         // Mode 01 PID 01
+  getMisfireCounters(): Promise<{ cylinder: number; count: number }[]>; // Mode $06
+}
+
+// Temporary mock service – replace with real Bluetooth calls
+const obdService: OBDService = {
+  getDTCs: async (): Promise<string[]> => {
+    // Simulate OBD Mode 03 response: return a random subset of possible codes,
+    // sometimes empty to test the "No Faults" state.
+    const possible = ['P0300', 'P0301', 'P0171', 'P0420', 'P0217', 'P0562', 'P245A', 'P1CDA'];
+    const count = Math.floor(Math.random() * 4); // 0‑3 codes
+    return possible.slice(0, count);
+  },
+  getLiveData: async () => {
+    // Simulate Mode 01 PIDs with realistic fluctuations.
+    return {
+      rpm: 750 + Math.random() * 200,
+      coolant: 80 + Math.random() * 20,
+      voltage: 13.5 + Math.random() * 1.0,
+      maf: 10 + Math.random() * 10,
+      o2: 0.4 + Math.random() * 0.5,
+      fuelTrim: -3 + Math.random() * 6,
+    };
+  },
+  getReadiness: async () => {
+    // Mode 01 PID 01 – monitor status since DTCs cleared.
+    return {
+      misfire: true,
+      fuel: true,
+      catalyst: true,
+      evap: Math.random() > 0.5,
+      o2sensor: true,
+    };
+  },
+  getMisfireCounters: async () => {
+    // Mode $06 – misfire counts per cylinder (simulated).
+    return [
+      { cylinder: 1, count: Math.floor(Math.random() * 3) },
+      { cylinder: 2, count: Math.floor(Math.random() * 3) },
+      { cylinder: 3, count: Math.floor(Math.random() * 6) },
+      { cylinder: 4, count: Math.floor(Math.random() * 3) },
+    ];
+  },
+};
+
+// -----------------------------------------------------------------------------
+// Constants & Types
+// -----------------------------------------------------------------------------
 const COLORS = {
   background: '#0B0D10',
   card: '#15181C',
@@ -37,7 +108,6 @@ const COLORS = {
   overlay: 'rgba(0,0,0,0.72)',
 };
 
-// Maps the abstract "color" token stored on each urgency level to real hex values.
 const urgencyColor = (tone: 'danger' | 'warning' | 'accent') =>
   tone === 'danger' ? COLORS.danger : tone === 'warning' ? COLORS.warning : COLORS.accent;
 const urgencyDim = (tone: 'danger' | 'warning' | 'accent') =>
@@ -45,10 +115,6 @@ const urgencyDim = (tone: 'danger' | 'warning' | 'accent') =>
 
 type ViewMode = 'SCANNER' | 'LIVE_DATA' | 'READINESS';
 
-// A fault as rendered in the Scanner list. Every fault is either resolved
-// instantly from the local DTC_DATABASE ('LOCAL') or resolved asynchronously
-// from Gemini ('AI'). AI-sourced items pass through 'loading' → 'ready' (or
-// 'error' with a retry action) while LOCAL items are always 'ready'.
 type FaultStatus = 'ready' | 'loading' | 'error';
 type FaultItem = Partial<DTCRecord> & {
   code: string;
@@ -66,47 +132,44 @@ type AdviceContent = {
   source?: 'LOCAL' | 'AI';
 };
 
-// Simulates what the OBD-II adapter would actually read off the car's ECUs
-// during a scan. In production this comes from the Bluetooth/OBD adapter
-// SDK. It deliberately mixes codes that exist in DTC_DATABASE with codes
-// that don't (a rare code and a JAC-specific code) to exercise both paths
-// of the hybrid system on every scan.
-const RAW_SCAN_CODES = [
-  'P0300',
-  'P0301',
-  'P0171',
-  'P0420',
-  'P0217',
-  'P0562',
-  'P245A', // not in local dictionary → AI fallback
-  'P1CDA', // JAC-specific code, not in local dictionary → AI fallback
-];
-
-// Mocked Mode $06 misfire counters — 4 cylinders, threshold-based pass/fail.
-const MISFIRE_THRESHOLD = 2;
-const MISFIRE_COUNTERS = [
-  { cylinder: 1, count: 0 },
-  { cylinder: 2, count: 1 },
-  { cylinder: 3, count: 4 },
-  { cylinder: 4, count: 0 },
-];
-
-const EMISSIONS_READINESS = [
-  { key: 'misfire', labelEn: 'Misfire Monitor', labelAr: 'مراقبة التفتيش', icon: 'pulse-outline', ready: true },
-  { key: 'fuel', labelEn: 'Fuel System', labelAr: 'نظام الوقود', icon: 'water-outline', ready: true },
-  { key: 'catalyst', labelEn: 'Catalyst', labelAr: 'الكاتاليزر', icon: 'filter-outline', ready: true },
-  { key: 'evap', labelEn: 'EVAP System', labelAr: 'نظام التبخر EVAP', icon: 'cloud-outline', ready: false },
-  { key: 'o2sensor', labelEn: 'Oxygen Sensor', labelAr: 'حساس الأكسجين', icon: 'analytics-outline', ready: true },
-];
-
+// -----------------------------------------------------------------------------
+// Main Component
+// -----------------------------------------------------------------------------
 export default function DiagnosticsScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
 
+  // Tab state
   const [activeView, setActiveView] = useState<ViewMode>('SCANNER');
+
+  // --- SCANNER state ---
   const [isScanning, setIsScanning] = useState(false);
   const [faults, setFaults] = useState<FaultItem[] | null>(null);
+  const scanIdRef = useRef(0);
 
+  // --- LIVE DATA state ---
+  const [liveData, setLiveData] = useState({
+    rpm: 0,
+    coolant: 0,
+    voltage: 0,
+    maf: 0,
+    o2: 0,
+    fuelTrim: 0,
+  });
+  const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
+
+  // --- READINESS state ---
+  const [readiness, setReadiness] = useState<{
+    misfire: boolean;
+    fuel: boolean;
+    catalyst: boolean;
+    evap: boolean;
+    o2sensor: boolean;
+  } | null>(null);
+  const [misfireCounters, setMisfireCounters] = useState<{ cylinder: number; count: number }[] | null>(null);
+  const [isReadinessLoading, setIsReadinessLoading] = useState(false);
+
+  // --- Advice Modal ---
   const [adviceModalVisible, setAdviceModalVisible] = useState(false);
   const [currentAdvice, setCurrentAdvice] = useState<AdviceContent>({
     title: '',
@@ -114,65 +177,53 @@ export default function DiagnosticsScreen() {
     steps: [],
   });
 
-  // Bumped every time a new scan starts. AI responses carry the scan id
-  // they were requested under; if it no longer matches scanIdRef.current
-  // when the response arrives, a newer scan has since started and the
-  // response is stale — it's ignored instead of overwriting the current
-  // list. Without this, tapping "Scan" again while an AI fallback request
-  // from the previous scan is still in flight could let that old response
-  // land on top of the new scan's results.
-  const scanIdRef = useRef(0);
-
-  // --- Hybrid resolution -----------------------------------------------
-  // 1. LOCAL CHECK: look the code up in DTC_DATABASE first — this is
-  //    instant and works fully offline.
-  // 2. AI FALLBACK: if the code isn't in the local dictionary, place a
-  //    "loading" placeholder card immediately (so the UI never hides or
-  //    silently drops an unknown code) and kick off a Gemini request in
-  //    the background. When it resolves, that one card is updated in
-  //    place; other cards are unaffected.
+  // ---------------------------------------------------------------------------
+  // DTC Scan (Mode 03)
+  // ---------------------------------------------------------------------------
   const resolveFaultCode = async (code: string, scanId: number) => {
     try {
       const ai = await fetchDTCFromAI(code);
-      if (scanIdRef.current !== scanId) return; // a newer scan superseded this request
-      setFaults((prev) => prev?.map((f) => (f.code === code ? { ...ai, source: 'AI', status: 'ready' } : f)) ?? prev);
+      if (scanIdRef.current !== scanId) return;
+      setFaults((prev) =>
+        prev?.map((f) => (f.code === code ? { ...ai, source: 'AI', status: 'ready' } : f)) ?? prev
+      );
     } catch (err) {
       console.warn(`AI fallback failed for ${code}:`, err);
-      if (scanIdRef.current !== scanId) return; // a newer scan superseded this request
+      if (scanIdRef.current !== scanId) return;
       setFaults((prev) => prev?.map((f) => (f.code === code ? { ...f, status: 'error' } : f)) ?? prev);
     }
   };
 
   const handleScan = async () => {
     const thisScan = ++scanIdRef.current;
-
     setIsScanning(true);
     setFaults(null);
 
-    // Simulates the time the adapter takes to pull stored codes off the bus.
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    try {
+      // Replace with actual Bluetooth call: obdService.getDTCs()
+      const codes = await obdService.getDTCs();
 
-    // If another scan started while we were "reading" the bus, bail out —
-    // that newer scan already owns the screen's state from here on.
-    if (scanIdRef.current !== thisScan) return;
+      // If a newer scan started while we were waiting, discard results.
+      if (scanIdRef.current !== thisScan) return;
 
-    const initialFaults: FaultItem[] = RAW_SCAN_CODES.map((code) => {
-      const local = DTC_DATABASE[code];
-      if (local) {
-        return { ...local, source: 'LOCAL', status: 'ready' };
-      }
-      // Unknown to the local dictionary — shown right away as a loading
-      // card rather than being hidden, then resolved via Gemini below.
-      return { code, source: 'AI', status: 'loading' };
-    });
+      const initialFaults: FaultItem[] = codes.map((code) => {
+        const local = DTC_DATABASE[code];
+        if (local) {
+          return { ...local, source: 'LOCAL', status: 'ready' };
+        }
+        return { code, source: 'AI', status: 'loading' };
+      });
 
-    setFaults(initialFaults);
-    setIsScanning(false);
+      setFaults(initialFaults);
 
-    // Fire off AI resolution for every code that missed the local lookup.
-    // Each one resolves independently so a slow/failed code never blocks
-    // the rest of the list.
-    initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, thisScan));
+      // Fire AI resolution for codes not found locally
+      initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, thisScan));
+    } catch (error) {
+      console.error('Scan failed:', error);
+      Alert.alert('Error', isAr ? 'فشل الفحص' : 'Scan failed');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const handleClear = () => {
@@ -182,6 +233,64 @@ export default function DiagnosticsScreen() {
     ]);
   };
 
+  // ---------------------------------------------------------------------------
+  // Live Data (Mode 01 PIDs)
+  // ---------------------------------------------------------------------------
+  const fetchLiveData = useCallback(async () => {
+    setIsLiveDataLoading(true);
+    try {
+      // Replace with actual Bluetooth call: obdService.getLiveData()
+      const data = await obdService.getLiveData();
+      setLiveData(data);
+    } catch (error) {
+      console.warn('Failed to fetch live data:', error);
+    } finally {
+      setIsLiveDataLoading(false);
+    }
+  }, []);
+
+  // Poll live data when the tab is active
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (activeView === 'LIVE_DATA') {
+      fetchLiveData(); // immediate first fetch
+      interval = setInterval(fetchLiveData, 1000); // update every second
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [activeView, fetchLiveData]);
+
+  // ---------------------------------------------------------------------------
+  // Readiness & Misfire Counters (Mode 01 PID 01 & Mode $06)
+  // ---------------------------------------------------------------------------
+  const fetchReadiness = useCallback(async () => {
+    setIsReadinessLoading(true);
+    try {
+      // Replace with actual Bluetooth calls
+      const [read, misfire] = await Promise.all([
+        obdService.getReadiness(),
+        obdService.getMisfireCounters(),
+      ]);
+      setReadiness(read);
+      setMisfireCounters(misfire);
+    } catch (error) {
+      console.warn('Failed to fetch readiness data:', error);
+    } finally {
+      setIsReadinessLoading(false);
+    }
+  }, []);
+
+  // Fetch readiness when the tab becomes active
+  useEffect(() => {
+    if (activeView === 'READINESS') {
+      fetchReadiness();
+    }
+  }, [activeView, fetchReadiness]);
+
+  // ---------------------------------------------------------------------------
+  // Advice Modal helpers
+  // ---------------------------------------------------------------------------
   const openFaultAdvice = (f: FaultItem) => {
     if (f.status !== 'ready' || !f.adviceAr || !f.adviceEn || !f.urgency) return;
     const [immediateGuidance, ...steps] = isAr ? f.adviceAr : f.adviceEn;
@@ -214,6 +323,9 @@ export default function DiagnosticsScreen() {
     setAdviceModalVisible(true);
   };
 
+  // ---------------------------------------------------------------------------
+  // Computed values for UI
+  // ---------------------------------------------------------------------------
   const faultCount = faults?.length ?? 0;
   const stopCount = useMemo(() => faults?.filter((f) => f.urgency === 'STOP').length ?? 0, [faults]);
 
@@ -307,32 +419,34 @@ export default function DiagnosticsScreen() {
           <View style={styles.liveGrid}>
             <LiveCard
               icon="battery-charging-outline"
-              tone="success"
-              value="14.2"
+              tone={liveData.voltage > 12.5 ? 'success' : 'warning'}
+              value={liveData.voltage.toFixed(1)}
               unit="V"
               labelEn="Battery Voltage"
               labelAr="جهد البطارية"
-              statusEn="Normal"
-              statusAr="طبيعي"
+              statusEn={liveData.voltage > 12.5 ? 'Normal' : 'Check'}
+              statusAr={liveData.voltage > 12.5 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
             />
             <LiveCard
               icon="thermometer-outline"
-              tone="success"
-              value="88"
+              tone={liveData.coolant < 100 ? 'success' : 'warning'}
+              value={liveData.coolant.toFixed(0)}
               unit="°C"
               labelEn="Coolant Temp"
               labelAr="حرارة المحرك"
-              statusEn="Normal"
-              statusAr="طبيعي"
+              statusEn={liveData.coolant < 100 ? 'Normal' : 'High'}
+              statusAr={liveData.coolant < 100 ? 'طبيعي' : 'مرتفع'}
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
             />
             <LiveCard
               icon="speedometer-outline"
               tone="accent"
-              value="850"
+              value={liveData.rpm.toFixed(0)}
               unit="RPM"
               labelEn="Engine Speed"
               labelAr="سرعة المحرك"
@@ -340,11 +454,12 @@ export default function DiagnosticsScreen() {
               statusAr="طبيعي"
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
             />
             <LiveCard
               icon="flash-outline"
               tone="accent"
-              value="14.5"
+              value={liveData.maf.toFixed(1)}
               unit="g/s"
               labelEn="MAF Air Flow"
               labelAr="تدفق الهواء"
@@ -352,18 +467,20 @@ export default function DiagnosticsScreen() {
               statusAr="طبيعي"
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
             />
             <LiveCard
               icon="analytics-outline"
-              tone="warning"
-              value="0.65"
+              tone={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'success' : 'warning'}
+              value={liveData.o2.toFixed(2)}
               unit="V"
               labelEn="O2 Sensor"
               labelAr="حساس الأكسجين"
-              statusEn="Checking"
-              statusAr="فحص"
+              statusEn={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'Normal' : 'Check'}
+              statusAr={liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
               onPress={() =>
                 openSensorAdvice(
                   'O2 Sensor — Checking',
@@ -385,15 +502,16 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="options-outline"
-              tone="success"
-              value="+2.3"
+              tone={Math.abs(liveData.fuelTrim) < 5 ? 'success' : 'warning'}
+              value={liveData.fuelTrim.toFixed(1)}
               unit="%"
               labelEn="Fuel Trim"
               labelAr="ضبط الوقود"
-              statusEn="Normal"
-              statusAr="طبيعي"
+              statusEn={Math.abs(liveData.fuelTrim) < 5 ? 'Normal' : 'Check'}
+              statusAr={Math.abs(liveData.fuelTrim) < 5 ? 'طبيعي' : 'فحص'}
               isAr={isAr}
               dir={dir}
+              isLoading={isLiveDataLoading}
             />
           </View>
         )}
@@ -403,35 +521,52 @@ export default function DiagnosticsScreen() {
             <Text style={[styles.sectionHeading, { textAlign: isAr ? 'right' : 'left' }]}>
               {isAr ? 'جاهزية الانبعاثات' : 'Emissions Readiness'}
             </Text>
-            <View style={styles.glassCard}>
-              {EMISSIONS_READINESS.map((item, i) => (
-                <View
-                  key={item.key}
-                  style={[
-                    styles.readinessRow,
-                    { flexDirection: dir },
-                    i === EMISSIONS_READINESS.length - 1 && styles.readinessRowLast,
-                  ]}
-                >
-                  <View style={[styles.readinessLeft, { flexDirection: dir }]}>
-                    <View style={[styles.readinessIconWrap, { backgroundColor: item.ready ? COLORS.successDim : COLORS.warningDim }]}>
-                      <Ionicons name={item.icon as any} size={16} color={item.ready ? COLORS.success : COLORS.warning} />
+            {isReadinessLoading ? (
+              <ActivityIndicator color={COLORS.accent} size="large" style={{ marginVertical: 20 }} />
+            ) : readiness ? (
+              <View style={styles.glassCard}>
+                {[
+                  { key: 'misfire', labelEn: 'Misfire Monitor', labelAr: 'مراقبة التفتيش', icon: 'pulse-outline' },
+                  { key: 'fuel', labelEn: 'Fuel System', labelAr: 'نظام الوقود', icon: 'water-outline' },
+                  { key: 'catalyst', labelEn: 'Catalyst', labelAr: 'الكاتاليزر', icon: 'filter-outline' },
+                  { key: 'evap', labelEn: 'EVAP System', labelAr: 'نظام التبخر EVAP', icon: 'cloud-outline' },
+                  { key: 'o2sensor', labelEn: 'Oxygen Sensor', labelAr: 'حساس الأكسجين', icon: 'analytics-outline' },
+                ].map((item, i) => {
+                  const ready = readiness[item.key as keyof typeof readiness];
+                  return (
+                    <View
+                      key={item.key}
+                      style={[
+                        styles.readinessRow,
+                        { flexDirection: dir },
+                        i === 4 && styles.readinessRowLast,
+                      ]}
+                    >
+                      <View style={[styles.readinessLeft, { flexDirection: dir }]}>
+                        <View style={[styles.readinessIconWrap, { backgroundColor: ready ? COLORS.successDim : COLORS.warningDim }]}>
+                          <Ionicons name={item.icon as any} size={16} color={ready ? COLORS.success : COLORS.warning} />
+                        </View>
+                        <Text style={styles.readinessLabel}>{isAr ? item.labelAr : item.labelEn}</Text>
+                      </View>
+                      <View style={[styles.readinessStatusPill, { backgroundColor: ready ? COLORS.successDim : COLORS.warningDim, flexDirection: dir }]}>
+                        <Ionicons
+                          name={ready ? 'checkmark-circle' : 'time-outline'}
+                          size={14}
+                          color={ready ? COLORS.success : COLORS.warning}
+                        />
+                        <Text style={[styles.readinessStatusText, { color: ready ? COLORS.success : COLORS.warning }]}>
+                          {ready ? (isAr ? 'جاهز' : 'Ready') : (isAr ? 'غير جاهز' : 'Not Ready')}
+                        </Text>
+                      </View>
                     </View>
-                    <Text style={styles.readinessLabel}>{isAr ? item.labelAr : item.labelEn}</Text>
-                  </View>
-                  <View style={[styles.readinessStatusPill, { backgroundColor: item.ready ? COLORS.successDim : COLORS.warningDim, flexDirection: dir }]}>
-                    <Ionicons
-                      name={item.ready ? 'checkmark-circle' : 'time-outline'}
-                      size={14}
-                      color={item.ready ? COLORS.success : COLORS.warning}
-                    />
-                    <Text style={[styles.readinessStatusText, { color: item.ready ? COLORS.success : COLORS.warning }]}>
-                      {item.ready ? (isAr ? 'جاهز' : 'Ready') : (isAr ? 'غير جاهز' : 'Not Ready')}
-                    </Text>
-                  </View>
-                </View>
-              ))}
-            </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text style={{ color: COLORS.textSecondary, textAlign: 'center', marginVertical: 20 }}>
+                {isAr ? 'لا توجد بيانات جاهزية' : 'No readiness data'}
+              </Text>
+            )}
 
             <Text style={[styles.sectionHeading, { textAlign: isAr ? 'right' : 'left', marginTop: 24 }]}>
               {isAr ? 'عدادات التفتيش — Mode $06' : 'Misfire Counters — Mode $06'}
@@ -441,45 +576,53 @@ export default function DiagnosticsScreen() {
                 ? 'عدد أحداث التفتيش المسجلة لكل سلندر منذ آخر مسح للأعطال'
                 : 'Recorded misfire events per cylinder since the last fault clear'}
             </Text>
-            <View style={styles.misfireGrid}>
-              {MISFIRE_COUNTERS.map((m) => {
-                const pass = m.count <= MISFIRE_THRESHOLD;
-                const pct = Math.min(100, (m.count / 6) * 100);
-                return (
-                  <View key={m.cylinder} style={styles.misfireCard}>
-                    <View style={[styles.misfireCardTop, { flexDirection: dir }]}>
-                      <Text style={styles.misfireCylinderLabel}>
-                        {isAr ? `سلندر ${m.cylinder}` : `Cylinder ${m.cylinder}`}
-                      </Text>
-                      <View
-                        style={[
-                          styles.misfireStatusPill,
-                          { backgroundColor: pass ? COLORS.successDim : COLORS.dangerDim, flexDirection: dir },
-                        ]}
-                      >
-                        <Ionicons
-                          name={pass ? 'checkmark-circle' : 'close-circle'}
-                          size={12}
-                          color={pass ? COLORS.success : COLORS.danger}
-                        />
-                        <Text style={[styles.misfireStatusText, { color: pass ? COLORS.success : COLORS.danger }]}>
-                          {pass ? (isAr ? 'ضمن الحد' : 'Pass') : (isAr ? 'تجاوز الحد' : 'Fail')}
+            {isReadinessLoading ? (
+              <ActivityIndicator color={COLORS.accent} size="large" style={{ marginVertical: 20 }} />
+            ) : misfireCounters ? (
+              <View style={styles.misfireGrid}>
+                {misfireCounters.map((m) => {
+                  const pass = m.count <= 2; // threshold
+                  const pct = Math.min(100, (m.count / 6) * 100);
+                  return (
+                    <View key={m.cylinder} style={styles.misfireCard}>
+                      <View style={[styles.misfireCardTop, { flexDirection: dir }]}>
+                        <Text style={styles.misfireCylinderLabel}>
+                          {isAr ? `سلندر ${m.cylinder}` : `Cylinder ${m.cylinder}`}
                         </Text>
+                        <View
+                          style={[
+                            styles.misfireStatusPill,
+                            { backgroundColor: pass ? COLORS.successDim : COLORS.dangerDim, flexDirection: dir },
+                          ]}
+                        >
+                          <Ionicons
+                            name={pass ? 'checkmark-circle' : 'close-circle'}
+                            size={12}
+                            color={pass ? COLORS.success : COLORS.danger}
+                          />
+                          <Text style={[styles.misfireStatusText, { color: pass ? COLORS.success : COLORS.danger }]}>
+                            {pass ? (isAr ? 'ضمن الحد' : 'Pass') : (isAr ? 'تجاوز الحد' : 'Fail')}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.misfireCount}>{m.count}</Text>
+                      <View style={styles.misfireBarTrack}>
+                        <View
+                          style={[
+                            styles.misfireBarFill,
+                            { width: `${pct}%`, backgroundColor: pass ? COLORS.success : COLORS.danger },
+                          ]}
+                        />
                       </View>
                     </View>
-                    <Text style={styles.misfireCount}>{m.count}</Text>
-                    <View style={styles.misfireBarTrack}>
-                      <View
-                        style={[
-                          styles.misfireBarFill,
-                          { width: `${pct}%`, backgroundColor: pass ? COLORS.success : COLORS.danger },
-                        ]}
-                      />
-                    </View>
-                  </View>
-                );
-              })}
-            </View>
+                  );
+                })}
+              </View>
+            ) : (
+              <Text style={{ color: COLORS.textSecondary, textAlign: 'center', marginVertical: 20 }}>
+                {isAr ? 'لا توجد بيانات تعداد التفتيش' : 'No misfire counter data'}
+              </Text>
+            )}
           </View>
         )}
       </ScrollView>
@@ -495,7 +638,9 @@ export default function DiagnosticsScreen() {
   );
 }
 
-/* ----------------------------- Segmented Tabs ---------------------------- */
+// -----------------------------------------------------------------------------
+// Sub‑components (unchanged except for optional isLoading prop)
+// -----------------------------------------------------------------------------
 
 function SegmentedTabs({
   activeView,
@@ -537,8 +682,6 @@ function SegmentedTabs({
   );
 }
 
-/* ------------------------------- Fault Card ------------------------------ */
-
 function FaultCard({
   fault,
   isAr,
@@ -552,7 +695,6 @@ function FaultCard({
   onPress: () => void;
   onRetry: () => void;
 }) {
-  // --- Loading state: AI is still resolving a code not found locally ---
   if (fault.status === 'loading') {
     return (
       <View style={[styles.faultCard, styles.faultCardPending]}>
@@ -575,7 +717,6 @@ function FaultCard({
     );
   }
 
-  // --- Error state: AI request failed (network/API issue) ---
   if (fault.status === 'error') {
     return (
       <View style={[styles.faultCard, styles.faultCardError]}>
@@ -601,7 +742,6 @@ function FaultCard({
     );
   }
 
-  // --- Ready state: fully resolved, whether from local dictionary or AI ---
   const meta = URGENCY_META[fault.urgency!];
   const tone = urgencyColor(meta.color);
   const dim = urgencyDim(meta.color);
@@ -642,8 +782,6 @@ function FaultCard({
   );
 }
 
-/* -------------------------------- Live Card ------------------------------- */
-
 function LiveCard({
   icon,
   tone,
@@ -656,6 +794,7 @@ function LiveCard({
   isAr,
   dir,
   onPress,
+  isLoading = false,
 }: {
   icon: any;
   tone: 'success' | 'warning' | 'accent';
@@ -668,8 +807,8 @@ function LiveCard({
   isAr: boolean;
   dir: 'row' | 'row-reverse';
   onPress?: () => void;
+  isLoading?: boolean;
 }) {
-  const isNormal = tone === 'success';
   const color = tone === 'success' ? COLORS.success : tone === 'warning' ? COLORS.warning : COLORS.accent;
   const dimColor = tone === 'success' ? COLORS.successDim : tone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
 
@@ -684,11 +823,15 @@ function LiveCard({
           <Text style={[styles.statusBadgeText, { color }]}>{isAr ? statusAr : statusEn}</Text>
         </View>
       </View>
-      <Text style={[styles.liveValue, { textAlign: isAr ? 'right' : 'left', color: isNormal ? COLORS.textPrimary : color }]}>
-        {value} <Text style={styles.liveUnit}>{unit}</Text>
-      </Text>
+      {isLoading ? (
+        <ActivityIndicator color={color} style={{ marginVertical: 8 }} />
+      ) : (
+        <Text style={[styles.liveValue, { textAlign: isAr ? 'right' : 'left', color: color }]}>
+          {value} <Text style={styles.liveUnit}>{unit}</Text>
+        </Text>
+      )}
       <Text style={[styles.liveLabel, { textAlign: isAr ? 'right' : 'left' }]}>{isAr ? labelAr : labelEn}</Text>
-      {!isNormal && onPress && (
+      {!isLoading && onPress && (
         <View style={[styles.liveCardHint, { flexDirection: dir }]}>
           <Ionicons name="information-circle-outline" size={12} color={COLORS.textTertiary} />
           <Text style={styles.liveCardHintText}>{isAr ? 'اضغط للتفاصيل' : 'Tap for details'}</Text>
@@ -697,7 +840,7 @@ function LiveCard({
     </>
   );
 
-  if (!isNormal && onPress) {
+  if (onPress && !isLoading) {
     return (
       <TouchableOpacity style={[styles.liveCard, styles.liveCardTappable]} onPress={onPress} activeOpacity={0.8}>
         {CardInner}
@@ -706,8 +849,6 @@ function LiveCard({
   }
   return <View style={styles.liveCard}>{CardInner}</View>;
 }
-
-/* ------------------------------- Advice Modal ------------------------------ */
 
 function AdviceModal({
   visible,
@@ -811,8 +952,9 @@ function AdviceModal({
   );
 }
 
-/* ---------------------------------- Styles --------------------------------- */
-
+// -----------------------------------------------------------------------------
+// Styles (unchanged)
+// -----------------------------------------------------------------------------
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
 
@@ -1031,8 +1173,6 @@ const styles = StyleSheet.create({
   adviceHeader: { alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14, gap: 10 },
   adviceTitleText: { color: COLORS.textPrimary, fontSize: 19, fontWeight: '900' },
   adviceSubtitleText: { color: COLORS.textSecondary, fontSize: 13, marginTop: 3, lineHeight: 18 },
-  modalUrgencyPill: { alignSelf: 'flex-start', marginBottom: 14 },
-
   immediateBox: { borderRadius: 16, borderWidth: 1.5, padding: 15, marginBottom: 22 },
   immediateBoxHeader: { alignItems: 'center', gap: 7, marginBottom: 8 },
   immediateBoxLabel: { fontSize: 13, fontWeight: '800' },
