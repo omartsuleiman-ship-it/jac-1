@@ -43,8 +43,29 @@ jobs:
         working-directory: ios
         run: |
           WORKSPACE=$(ls | grep .xcworkspace | head -n 1)
+          echo "--- All schemes found ---"
+          xcodebuild -workspace "$WORKSPACE" -list -json
+
+          PROJECT_NAME=$(ls | grep .xcodeproj | head -n 1 | sed 's/\.xcodeproj//')
+          echo "Project name detected: $PROJECT_NAME"
+          export PROJECT_NAME
+
           SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json | \
-            ruby -rjson -e 'puts JSON.parse(STDIN.read)["workspace"]["schemes"].reject { |s| s.include?("Pods") }.first')
+            ruby -rjson -e '
+              data = JSON.parse(STDIN.read)
+              schemes = data["workspace"]["schemes"]
+              project = ENV["PROJECT_NAME"]
+              match = schemes.find { |s| s == project }
+              match ||= schemes.reject { |s| s.include?("Pods") || s.start_with?("React") || s.start_with?("Expo") || s.start_with?("RCT") }.first
+              puts match
+            ')
+
+          if [ -z "$SCHEME" ]; then
+            echo "Could not confidently detect app scheme. Full scheme list was:"
+            xcodebuild -workspace "$WORKSPACE" -list
+            exit 1
+          fi
+
           echo "workspace=$WORKSPACE" >> "$GITHUB_OUTPUT"
           echo "name=$SCHEME" >> "$GITHUB_OUTPUT"
           echo "Detected workspace: $WORKSPACE, scheme: $SCHEME"
