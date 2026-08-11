@@ -39,14 +39,17 @@ export default function RootLayout() {
     };
     requestPermissions();
 
-    // 🔔 IMPORTANT: When scheduling notifications, you MUST add `sound: true`
-    // to the `content` object of each `Notifications.scheduleNotificationAsync` call.
+    // ⚠️ CRITICAL iOS NOTIFICATION SOUND FIX:
+    // Every call to `Notifications.scheduleNotificationAsync` MUST include
+    // `sound: 'default'` (or `sound: true`) inside the `content` object.
+    // Without this, iOS will NOT play a sound even with the handler set.
+    //
     // Example:
     // await Notifications.scheduleNotificationAsync({
     //   content: {
     //     title: "Hello",
     //     body: "World",
-    //     sound: true,   // <-- required for iOS sound
+    //     sound: 'default',   // <-- required for iOS sound
     //   },
     //   trigger: null,
     // });
