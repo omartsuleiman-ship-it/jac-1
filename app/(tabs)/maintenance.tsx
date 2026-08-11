@@ -171,6 +171,7 @@ async function scheduleMaintenanceNotification(
         title: 'Maintenance Reminder 🔧',
         body: `${itemName} is approaching its service threshold. Time for a check-up!`,
         data: { itemId },
+        sound: 'default',
       },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
