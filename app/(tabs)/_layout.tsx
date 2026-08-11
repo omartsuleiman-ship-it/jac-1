@@ -1,9 +1,10 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Tabs } from 'expo-router';
-import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useState, useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// ── 1. Global Language Context (عشان اللغة تسمع في التطبيق كله) ──
+// ── 1. Global Language Context ──
 type LangContextType = { lang: 'en' | 'ar'; toggleLang: () => void; isAr: boolean };
 const LangContext = createContext<LangContextType>({ lang: 'ar', toggleLang: () => {}, isAr: true });
 export const useLang = () => useContext(LangContext);
@@ -16,10 +17,36 @@ const COLORS = {
   inactive: '#5A6169',
 };
 
+const STORAGE_KEY = 'app_language';
+
 export default function TabLayout() {
-  // حالة اللغة الأساسية للتطبيق كله (هنبداً بالعربي)
   const [lang, setLang] = useState<'en' | 'ar'>('ar');
-  const toggleLang = () => setLang((prev) => (prev === 'en' ? 'ar' : 'en'));
+
+  // Load saved language on mount
+  useEffect(() => {
+    const loadLanguage = async () => {
+      try {
+        const saved = await AsyncStorage.getItem(STORAGE_KEY);
+        if (saved === 'en' || saved === 'ar') {
+          setLang(saved);
+        }
+      } catch (error) {
+        console.warn('Failed to load language:', error);
+      }
+    };
+    loadLanguage();
+  }, []);
+
+  const toggleLang = async () => {
+    const newLang = lang === 'en' ? 'ar' : 'en';
+    setLang(newLang);
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY, newLang);
+    } catch (error) {
+      console.warn('Failed to save language:', error);
+    }
+  };
+
   const isAr = lang === 'ar';
 
   return (
@@ -40,7 +67,7 @@ export default function TabLayout() {
             height: 88,
             paddingTop: 8,
             paddingBottom: 28,
-            flexDirection: isAr ? 'row-reverse' : 'row', 
+            flexDirection: isAr ? 'row-reverse' : 'row',
           },
           tabBarLabelStyle: {
             fontSize: 11,
@@ -52,7 +79,7 @@ export default function TabLayout() {
           name="index"
           options={{
             title: isAr ? 'الرئيسية' : 'Home',
-            tabBarStyle: { display: 'none' }, // ── إخفاء الشريط من الشاشة الرئيسية ──
+            tabBarStyle: { display: 'none' },
             tabBarIcon: ({ color, size, focused }) => (
               <IconWrapper focused={focused}>
                 <Ionicons name={focused ? 'home' : 'home-outline'} size={size} color={color} />
