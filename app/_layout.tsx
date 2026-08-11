@@ -14,12 +14,12 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
-  // Set notification handler with sound
+  // Set notification handler with sound enabled
   useEffect(() => {
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowAlert: true,
-        shouldPlaySound: true,
+        shouldPlaySound: true,   // ✅ required for sound to play
         shouldSetBadge: false,
       }),
     });
@@ -38,6 +38,18 @@ export default function RootLayout() {
       }
     };
     requestPermissions();
+
+    // 🔔 IMPORTANT: When scheduling notifications, you MUST add `sound: true`
+    // to the `content` object of each `Notifications.scheduleNotificationAsync` call.
+    // Example:
+    // await Notifications.scheduleNotificationAsync({
+    //   content: {
+    //     title: "Hello",
+    //     body: "World",
+    //     sound: true,   // <-- required for iOS sound
+    //   },
+    //   trigger: null,
+    // });
   }, []);
 
   return (

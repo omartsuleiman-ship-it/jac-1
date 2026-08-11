@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": " jac s3",
-    "slug": " jac s3",
+    "name": "[اكتب الاسم الجديد هنا]",
+    "slug": "[اكتب الاسم الجديد هنا]",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -44,7 +44,7 @@
         {
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
-          "resizeMode": "contain",
+          "resizeMode": "cover",
           "backgroundColor": "#ffffff",
           "dark": {
             "backgroundColor": "#000000"
@@ -66,7 +66,8 @@
         "expo-notifications",
         {
           "icon": "./assets/images/notification-icon.png",
-          "color": "#00D9C6"
+          "color": "#00D9C6",
+          "sounds": ["./assets/sounds/notification.wav"]
         }
       ]
     ],
