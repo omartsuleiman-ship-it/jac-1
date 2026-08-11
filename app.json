@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "يعم سهلة",
-    "slug": "my-car-app",
+    "slug": "يعم سهلة",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -60,6 +60,14 @@
             "central"
           ],
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to your ARC 103 device"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#00D9C6",
+          "sounds": ["./assets/sounds/notification.wav"]
         }
       ]
     ],
