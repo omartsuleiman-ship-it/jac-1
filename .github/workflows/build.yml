@@ -50,6 +50,7 @@ jobs:
           echo "Detected workspace: $WORKSPACE, scheme: $SCHEME"
 
       - name: Build unsigned .app (device architecture, no signing)
+        id: build
         working-directory: ios
         run: |
           xcodebuild \
@@ -65,16 +66,39 @@ jobs:
             CODE_SIGN_ENTITLEMENTS="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            clean build
+            clean build | tee xcodebuild.log
+
+          BUILT_PRODUCTS_DIR=$(xcodebuild \
+            -workspace "${{ steps.scheme.outputs.workspace }}" \
+            -scheme "${{ steps.scheme.outputs.name }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -showBuildSettings 2>/dev/null | grep -m1 "BUILT_PRODUCTS_DIR" | sed 's/^[^=]*= //')
+
+          echo "Resolved BUILT_PRODUCTS_DIR: $BUILT_PRODUCTS_DIR"
+          echo "built_products_dir=$BUILT_PRODUCTS_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Package Payload and zip into .ipa
         working-directory: ios
         run: |
-          APP_PATH=$(find build/Build/Products -iname "*.app" -type d | head -n 1)
+          echo "--- Searching for .app anywhere under build/ ---"
+          find build -iname "*.app" -type d || true
+
+          APP_PATH=$(find "${{ steps.build.outputs.built_products_dir }}" -maxdepth 1 -iname "*.app" -type d 2>/dev/null | head -n 1)
+
           if [ -z "$APP_PATH" ]; then
-            echo "No .app bundle found — build likely failed."
+            echo "Not found via BUILT_PRODUCTS_DIR, falling back to full recursive search under build/"
+            APP_PATH=$(find build -iname "*.app" -type d | head -n 1)
+          fi
+
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found anywhere under build/. Full tree for debugging:"
+            find build -maxdepth 5 -type d
             exit 1
           fi
+
           echo "Found app bundle: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
