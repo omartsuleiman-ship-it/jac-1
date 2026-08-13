@@ -10,6 +10,7 @@ const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
 // ── State ──
 let connectedDevice: Device | null = null;
 let obdCharacteristic: Characteristic | null = null;
+let writeWithoutResponseMode = false;
 
 // ── Response buffering: BLE notifications arrive in chunks; ELM327 terminates every reply with '>' ──
 let responseBuffer = '';
@@ -54,13 +55,17 @@ const processQueue = () => {
     processQueue();
   }, current.timeoutMs);
 
-  obdCharacteristic
-    .writeWithResponse(Buffer.from(current.command + '\r', 'ascii'))
-    .catch((error) => {
-      clearActiveCommand();
-      current.reject(error);
-      processQueue();
-    });
+  const payload = Buffer.from(current.command + '\r', 'ascii').toString('base64');
+  const writePromise = writeWithoutResponseMode
+    ? obdCharacteristic.writeWithoutResponse(payload)
+    : obdCharacteristic.writeWithResponse(payload);
+
+  console.log(`[BLE] > ${current.command}`);
+  writePromise.catch((error) => {
+    clearActiveCommand();
+    current.reject(error);
+    processQueue();
+  });
 };
 
 // ── Single persistent listener; buffers chunks until the '>' prompt closes the reply ──
@@ -112,12 +117,56 @@ const initializeELM327 = async () => {
   }
 };
 
+// ── Dynamically find the UART TX/RX characteristic instead of trusting a hardcoded UUID ──
+const discoverOBDCharacteristic = async (device: Device): Promise<Characteristic | null> => {
+  const services = await device.services();
+
+  for (const service of services) {
+    console.log(`[BLE] Service: ${service.uuid}`);
+    const characteristics = await service.characteristics();
+    for (const char of characteristics) {
+      console.log(
+        `[BLE]   Characteristic: ${char.uuid} | notify=${char.isNotifiable} | writeWithResponse=${char.isWritableWithResponse} | writeWithoutResponse=${char.isWritableWithoutResponse}`
+      );
+    }
+  }
+
+  // Prefer the known FFE0/FFE1 pair, but only trust it if it's actually notifiable + writable on this dongle
+  const knownChar = await device
+    .characteristicForUUID(OBD_SERVICE_UUID, OBD_CHARACTERISTIC_UUID)
+    .catch(() => null);
+  if (knownChar && knownChar.isNotifiable && (knownChar.isWritableWithResponse || knownChar.isWritableWithoutResponse)) {
+    console.log(`[BLE] Using known characteristic ${knownChar.uuid}`);
+    return knownChar;
+  }
+
+  // Fall back to scanning every service for a notifiable + writable characteristic (typical UART bridge)
+  for (const service of services) {
+    const characteristics = await service.characteristics();
+    for (const char of characteristics) {
+      if (char.isNotifiable && (char.isWritableWithResponse || char.isWritableWithoutResponse)) {
+        console.log(`[BLE] Auto-selected characteristic ${char.uuid} on service ${service.uuid}`);
+        return char;
+      }
+    }
+  }
+
+  return null;
+};
+
 // ── Set the connected device after successful connection ──
 export const setOBDDevice = async (device: Device) => {
   connectedDevice = device;
   await device.discoverAllServicesAndCharacteristics();
   try {
-    obdCharacteristic = await device.characteristicForUUID(OBD_SERVICE_UUID, OBD_CHARACTERISTIC_UUID);
+    const char = await discoverOBDCharacteristic(device);
+    if (!char) {
+      console.error('[BLE] No notifiable + writable characteristic found on this device');
+      return;
+    }
+    obdCharacteristic = char;
+    writeWithoutResponseMode = !char.isWritableWithResponse && char.isWritableWithoutResponse;
+    console.log(`[BLE] Selected ${char.uuid}, writeWithoutResponse=${writeWithoutResponseMode}`);
     responseBuffer = '';
     startNotifyListener();
     await initializeELM327();
