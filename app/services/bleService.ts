@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 
 // ── BLE Manager ──
@@ -202,17 +203,20 @@ export const setOBDDevice = async (device: Device) => {
     const char = await discoverOBDCharacteristic(device);
     if (!char) {
       console.error('[BLE] No notifiable + writable characteristic found on this device');
+      Alert.alert('BLE Char Error', 'No notifiable/writable characteristic found');
       return;
     }
     obdCharacteristic = char;
     writeWithoutResponseMode = !char.isWritableWithResponse && char.isWritableWithoutResponse;
     console.log(`[BLE] Selected ${char.uuid}, writeWithoutResponse=${writeWithoutResponseMode}`);
+    Alert.alert('BLE Success', 'Found UUID: ' + char.uuid);
     responseBuffer = '';
     startNotifyListener();
     await initializeELM327();
     await fetchAndSaveTrueOdometer();
-  } catch (error) {
+  } catch (error: any) {
     console.error(error);
+    Alert.alert('BLE Exception', error?.message ?? String(error));
   }
 };
 
