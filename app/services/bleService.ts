@@ -9,6 +9,56 @@ export const bleManager = new BleManager();
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
 const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
 
+// ── Pure-JS ASCII <-> Base64 helpers (RN has no global Buffer/Node polyfill) ──
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+const asciiToBase64 = (input: string): string => {
+  let output = '';
+  let i = 0;
+  while (i < input.length) {
+    const b1 = input.charCodeAt(i++) & 0xff;
+    const has2 = i < input.length;
+    const b2 = has2 ? input.charCodeAt(i++) & 0xff : 0;
+    const has3 = i < input.length;
+    const b3 = has3 ? input.charCodeAt(i++) & 0xff : 0;
+
+    const enc1 = b1 >> 2;
+    const enc2 = ((b1 & 0x03) << 4) | (b2 >> 4);
+    const enc3 = ((b2 & 0x0f) << 2) | (b3 >> 6);
+    const enc4 = b3 & 0x3f;
+
+    output +=
+      BASE64_CHARS.charAt(enc1) +
+      BASE64_CHARS.charAt(enc2) +
+      (has2 ? BASE64_CHARS.charAt(enc3) : '=') +
+      (has3 ? BASE64_CHARS.charAt(enc4) : '=');
+  }
+  return output;
+};
+
+const base64ToAscii = (input: string): string => {
+  const clean = input.replace(/[^A-Za-z0-9+/=]/g, '');
+  let output = '';
+  let i = 0;
+  while (i < clean.length) {
+    const c1 = clean.charAt(i++);
+    const c2 = clean.charAt(i++);
+    const c3 = clean.charAt(i++);
+    const c4 = clean.charAt(i++);
+
+    const enc1 = BASE64_CHARS.indexOf(c1);
+    const enc2 = BASE64_CHARS.indexOf(c2);
+    const enc3 = c3 === '=' || c3 === '' ? -1 : BASE64_CHARS.indexOf(c3);
+    const enc4 = c4 === '=' || c4 === '' ? -1 : BASE64_CHARS.indexOf(c4);
+    if (enc1 === -1 || enc2 === -1) break;
+
+    output += String.fromCharCode((enc1 << 2) | (enc2 >> 4));
+    if (enc3 !== -1) output += String.fromCharCode(((enc2 & 15) << 4) | (enc3 >> 2));
+    if (enc3 !== -1 && enc4 !== -1) output += String.fromCharCode(((enc3 & 3) << 6) | enc4);
+  }
+  return output;
+};
+
 // ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx / trip.tsx exactly ──
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
@@ -60,7 +110,7 @@ const processQueue = () => {
     processQueue();
   }, current.timeoutMs);
 
-  const payload = Buffer.from(current.command + '\r', 'ascii').toString('base64');
+  const payload = asciiToBase64(current.command + '\r');
   const writePromise = writeWithoutResponseMode
     ? obdCharacteristic.writeWithoutResponse(payload)
     : obdCharacteristic.writeWithResponse(payload);
@@ -88,7 +138,7 @@ const startNotifyListener = () => {
       return;
     }
     if (characteristic && characteristic.value) {
-      responseBuffer += Buffer.from(characteristic.value, 'base64').toString('ascii');
+      responseBuffer += base64ToAscii(characteristic.value);
       if (responseBuffer.includes('>')) {
         const raw = responseBuffer.replace(/>/g, '').trim();
         responseBuffer = '';
@@ -172,13 +222,19 @@ const discoverOBDCharacteristic = async (device: Device): Promise<Characteristic
     }
   }
 
-  // Prefer the known FFE0/FFE1 pair, but only trust it if it's actually notifiable + writable on this dongle
-  const knownChar = await device
-    .characteristicForUUID(OBD_SERVICE_UUID, OBD_CHARACTERISTIC_UUID)
-    .catch(() => null);
-  if (knownChar && knownChar.isNotifiable && (knownChar.isWritableWithResponse || knownChar.isWritableWithoutResponse)) {
-    console.log(`[BLE] Using known characteristic ${knownChar.uuid}`);
-    return knownChar;
+  // Prefer the known FFE0/FFE1 pair by scanning the services/characteristics we already fetched above
+  for (const service of services) {
+    const characteristics = await service.characteristics();
+    for (const char of characteristics) {
+      if (
+        char.uuid.toLowerCase() === OBD_CHARACTERISTIC_UUID.toLowerCase() &&
+        char.isNotifiable &&
+        (char.isWritableWithResponse || char.isWritableWithoutResponse)
+      ) {
+        console.log(`[BLE] Using known characteristic ${char.uuid}`);
+        return char;
+      }
+    }
   }
 
   // Fall back to scanning every service for a notifiable + writable characteristic (typical UART bridge)
