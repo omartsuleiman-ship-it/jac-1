@@ -11,18 +11,119 @@ const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
 let connectedDevice: Device | null = null;
 let obdCharacteristic: Characteristic | null = null;
 
-// ── Set the connected device after successful connection ──
-export const setOBDDevice = (device: Device) => {
-  connectedDevice = device;
-  // Discover services and get characteristic
-  device.discoverAllServicesAndCharacteristics().then(() => {
-    device
-      .characteristicForUUID(OBD_SERVICE_UUID, OBD_CHARACTERISTIC_UUID)
-      .then((char) => {
-        obdCharacteristic = char;
-      })
-      .catch(console.error);
+// ── Response buffering: BLE notifications arrive in chunks; ELM327 terminates every reply with '>' ──
+let responseBuffer = '';
+let notifySubscription: { remove: () => void } | null = null;
+
+// ── Command Queue: ELM327 is half-duplex, only one command may be in flight at a time ──
+interface QueuedCommand {
+  command: string;
+  resolve: (value: string) => void;
+  reject: (reason: any) => void;
+  timeoutMs: number;
+}
+const commandQueue: QueuedCommand[] = [];
+let activeCommand: QueuedCommand | null = null;
+let activeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+const clearActiveCommand = () => {
+  if (activeTimeout) {
+    clearTimeout(activeTimeout);
+    activeTimeout = null;
+  }
+  activeCommand = null;
+};
+
+const processQueue = () => {
+  if (activeCommand || commandQueue.length === 0) return;
+
+  if (!obdCharacteristic) {
+    while (commandQueue.length) {
+      commandQueue.shift()?.reject(new Error('OBD characteristic not available. Device not connected?'));
+    }
+    return;
+  }
+
+  activeCommand = commandQueue.shift()!;
+  responseBuffer = '';
+  const current = activeCommand;
+
+  activeTimeout = setTimeout(() => {
+    clearActiveCommand();
+    current.reject(new Error(`OBD command timeout: ${current.command}`));
+    processQueue();
+  }, current.timeoutMs);
+
+  obdCharacteristic
+    .writeWithResponse(Buffer.from(current.command + '\r', 'ascii'))
+    .catch((error) => {
+      clearActiveCommand();
+      current.reject(error);
+      processQueue();
+    });
+};
+
+// ── Single persistent listener; buffers chunks until the '>' prompt closes the reply ──
+const startNotifyListener = () => {
+  if (!obdCharacteristic) return;
+  notifySubscription?.remove();
+  notifySubscription = obdCharacteristic.monitor((error, characteristic) => {
+    if (error) {
+      if (activeCommand) {
+        const current = activeCommand;
+        clearActiveCommand();
+        current.reject(error);
+        processQueue();
+      }
+      return;
+    }
+    if (characteristic && characteristic.value) {
+      responseBuffer += Buffer.from(characteristic.value, 'base64').toString('ascii');
+      if (responseBuffer.includes('>')) {
+        const raw = responseBuffer.replace(/>/g, '').trim();
+        responseBuffer = '';
+        if (activeCommand) {
+          const current = activeCommand;
+          clearActiveCommand();
+          current.resolve(raw);
+          processQueue();
+        }
+      }
+    }
   });
+};
+
+const queueRawCommand = (command: string, timeoutMs = 2000): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    commandQueue.push({ command, resolve, reject, timeoutMs });
+    processQueue();
+  });
+};
+
+// ── ELM327 init sequence: reset, echo off, linefeeds off, auto-detect protocol ──
+const initializeELM327 = async () => {
+  try {
+    await queueRawCommand('ATZ', 3000);
+    await queueRawCommand('ATE0');
+    await queueRawCommand('ATL0');
+    await queueRawCommand('ATSP0');
+  } catch (error) {
+    console.warn('ELM327 initialization failed:', error);
+  }
+};
+
+// ── Set the connected device after successful connection ──
+export const setOBDDevice = async (device: Device) => {
+  connectedDevice = device;
+  await device.discoverAllServicesAndCharacteristics();
+  try {
+    obdCharacteristic = await device.characteristicForUUID(OBD_SERVICE_UUID, OBD_CHARACTERISTIC_UUID);
+    responseBuffer = '';
+    startNotifyListener();
+    await initializeELM327();
+  } catch (error) {
+    console.error(error);
+  }
 };
 
 // ── Scan functions ──
@@ -56,7 +157,7 @@ export const connectToBleDevice = async (device: Device): Promise<Device> => {
     stopBleScan();
     const connected = await device.connect();
     await connected.discoverAllServicesAndCharacteristics();
-    setOBDDevice(connected);
+    await setOBDDevice(connected);
     return connected;
   } catch (error) {
     throw error;
@@ -66,10 +167,22 @@ export const connectToBleDevice = async (device: Device): Promise<Device> => {
 export const disconnectBleDevice = async (deviceId: string) => {
   try {
     await bleManager.cancelDeviceConnection(deviceId);
-    connectedDevice = null;
-    obdCharacteristic = null;
   } catch (error) {
     console.error('Error disconnecting:', error);
+  } finally {
+    notifySubscription?.remove();
+    notifySubscription = null;
+    responseBuffer = '';
+    while (commandQueue.length) {
+      commandQueue.shift()?.reject(new Error('Device disconnected'));
+    }
+    if (activeCommand) {
+      const current = activeCommand;
+      clearActiveCommand();
+      current.reject(new Error('Device disconnected'));
+    }
+    connectedDevice = null;
+    obdCharacteristic = null;
   }
 };
 
@@ -90,31 +203,7 @@ export const sendOBDCommand = async (command: string, timeoutMs: number = 2000):
   if (!obdCharacteristic) {
     throw new Error('OBD characteristic not available. Device not connected?');
   }
-
-  const writeData = command + '\r\n';
-  await obdCharacteristic.writeWithResponse(Buffer.from(writeData, 'ascii'));
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      subscription.remove();
-      reject(new Error('OBD command timeout'));
-    }, timeoutMs);
-
-    const subscription = obdCharacteristic!.monitor((error, characteristic) => {
-      if (error) {
-        clearTimeout(timeout);
-        subscription.remove();
-        reject(error);
-        return;
-      }
-      if (characteristic && characteristic.value) {
-        const raw = Buffer.from(characteristic.value, 'base64').toString('ascii');
-        clearTimeout(timeout);
-        subscription.remove();
-        resolve(raw);
-      }
-    });
-  });
+  return queueRawCommand(command, timeoutMs);
 };
 
 /**
