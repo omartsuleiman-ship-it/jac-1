@@ -413,13 +413,9 @@ export const getReadiness = async () => {
   };
 };
 
-export const getMisfireCounters = async () => {
-  // Mode $06 – placeholder; real implementation would request TID/CID
-  console.warn('Mode 06 not fully implemented; returning simulated counts.');
-  return [
-    { cylinder: 1, count: Math.floor(Math.random() * 3) },
-    { cylinder: 2, count: Math.floor(Math.random() * 3) },
-    { cylinder: 3, count: Math.floor(Math.random() * 6) },
-    { cylinder: 4, count: Math.floor(Math.random() * 3) },
-  ];
+export const getMisfireCounters = async (): Promise<null> => {
+  // Mode $06 (TID/CID misfire counters) is not implemented for this dongle/protocol yet.
+  // Return null — never fabricated numbers — so the UI can honestly show "not supported / not implemented".
+  console.warn('[BLE] Mode 06 misfire data is not implemented; returning null.');
+  return null;
 };

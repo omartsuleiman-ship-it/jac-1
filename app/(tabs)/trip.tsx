@@ -1,4 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -15,6 +16,7 @@ import {
   View,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_DEFAULT, Region } from 'react-native-maps';
+import { isConnected, sendOBDCommand } from '../services/bleService';
 import { useLang } from './_layout'; // ── استدعاء اللغة العامة ──
 
 const COLORS = {
@@ -43,6 +45,9 @@ const DEFAULT_REGION: Region = {
 };
 
 const OSRM_BASE_URL = 'http://router.project-osrm.org/route/v1/driving';
+
+// ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx exactly ──
+const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
 async function fetchOsrmRoute(from: Coords, to: Coords): Promise<Coords[]> {
   const url = `${OSRM_BASE_URL}/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=full&geometries=geojson`;
@@ -109,6 +114,81 @@ export default function TripCostScreen() {
     })();
     return () => { subscription?.remove(); };
   }, [isAr]);
+
+  // ── Background OBD polling: speed (010D) drives distance, MAF (0110) drives fuel consumed, while trip is active ──
+  const lastPollRef = useRef<number | null>(null);
+  const tripOdometerDeltaRef = useRef(0);
+
+  const parseSpeedKmh = (response: string): number => {
+    const hex = response.replace(/\s/g, '').toUpperCase();
+    const idx = hex.indexOf('410D');
+    if (idx === -1) return 0;
+    const value = parseInt(hex.substring(idx + 4, idx + 6), 16);
+    return isNaN(value) ? 0 : value;
+  };
+
+  const parseMafGramsPerSec = (response: string): number => {
+    const hex = response.replace(/\s/g, '').toUpperCase();
+    const idx = hex.indexOf('4110');
+    if (idx === -1) return 0;
+    const bytes = hex.substring(idx + 4, idx + 8).match(/.{1,2}/g) || [];
+    if (bytes.length < 2) return 0;
+    const value = ((parseInt(bytes[0], 16) * 256) + parseInt(bytes[1], 16)) / 100;
+    return isNaN(value) ? 0 : value;
+  };
+
+  useEffect(() => {
+    if (!tripActive) {
+      lastPollRef.current = null;
+      return;
+    }
+    const poll = setInterval(async () => {
+      if (!isConnected()) return;
+      try {
+        const speedResponse = await sendOBDCommand('010D');
+        const mafResponse = await sendOBDCommand('0110');
+        const speedKmh = parseSpeedKmh(speedResponse);
+        const mafGramsPerSec = parseMafGramsPerSec(mafResponse);
+        const now = Date.now();
+
+        if (lastPollRef.current) {
+          const secondsElapsed = (now - lastPollRef.current) / 1000;
+          const hoursElapsed = secondsElapsed / 3600;
+
+          const deltaKm = speedKmh * hoursElapsed;
+          tripOdometerDeltaRef.current += deltaKm;
+          setDistanceKm((prev) => prev + deltaKm);
+
+          const deltaLiters = (mafGramsPerSec / 14.7 / 710) * secondsElapsed;
+          setFuelConsumedLiters((prev) => prev + deltaLiters);
+        }
+        lastPollRef.current = now;
+      } catch (error) {
+        console.warn('OBD trip poll failed:', error);
+      }
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [tripActive]);
+
+  const handleStartTrip = () => {
+    setDistanceKm(0);
+    setFuelConsumedLiters(0);
+    tripOdometerDeltaRef.current = 0;
+    lastPollRef.current = null;
+    setTripActive(true);
+  };
+
+  const handleEndTrip = async () => {
+    setTripActive(false);
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_KEY_ODOMETER);
+      const currentOdometer = stored ? JSON.parse(stored) : 0;
+      const updatedOdometer = currentOdometer + tripOdometerDeltaRef.current;
+      await AsyncStorage.setItem(STORAGE_KEY_ODOMETER, JSON.stringify(updatedOdometer));
+    } catch (error) {
+      console.warn('Failed to persist odometer:', error);
+    }
+  };
 
   const onSearchTextChange = (text: string, field: 'from' | 'to') => {
     if (field === 'from') setFromText(text);
@@ -384,13 +464,13 @@ export default function TripCostScreen() {
 
           {/* ACTIONS */}
           <View style={[styles.buttonRow, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
-            <TouchableOpacity style={[styles.actionButton, styles.startButton, tripActive && styles.disabledButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]} onPress={() => setTripActive(true)} disabled={tripActive}>
+            <TouchableOpacity style={[styles.actionButton, styles.startButton, tripActive && styles.disabledButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]} onPress={handleStartTrip} disabled={tripActive}>
               <Ionicons name="play" size={18} color={tripActive ? COLORS.textSecondary : '#0B0D10'} />
               <Text style={[styles.actionButtonText, { color: tripActive ? COLORS.textSecondary : '#0B0D10' }]}>
                 {isAr ? 'بدء الرحلة' : 'Start Trip'}
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.actionButton, styles.endButton, !tripActive && styles.disabledButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]} onPress={() => setTripActive(false)} disabled={!tripActive}>
+            <TouchableOpacity style={[styles.actionButton, styles.endButton, !tripActive && styles.disabledButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]} onPress={handleEndTrip} disabled={!tripActive}>
               <Ionicons name="stop" size={18} color={!tripActive ? COLORS.textSecondary : '#FFFFFF'} />
               <Text style={[styles.actionButtonText, { color: !tripActive ? COLORS.textSecondary : '#FFFFFF' }]}>
                 {isAr ? 'إنهاء الرحلة' : 'End Trip'}

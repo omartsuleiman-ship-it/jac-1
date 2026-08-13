@@ -1,5 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -85,7 +86,6 @@ const MAINTENANCE_CONFIG: MaintenanceConfig[] = [
 const STORAGE_KEY_RECORDS = '@car_app/maintenance_records_v1';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
-const DEFAULT_MOCK_ODOMETER = 45230;
 const ASSUMED_DAILY_KM = 40;
 
 function clamp(value: number, min: number, max: number) {
@@ -213,7 +213,7 @@ export default function MaintenanceScreen() {
 
   const [loading, setLoading] = useState(true);
   const [records, setRecords] = useState<RecordsMap>({});
-  const [currentOdometer, setCurrentOdometer] = useState(DEFAULT_MOCK_ODOMETER);
+  const [currentOdometer, setCurrentOdometer] = useState(0);
 
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MaintenanceConfig | null>(null);
@@ -261,7 +261,7 @@ export default function MaintenanceScreen() {
     };
   }, []);
 
-  useEffect(() => {
+ useEffect(() => {
     if (pendingItemId && !loading) {
       const targetItem = MAINTENANCE_CONFIG.find((cfg) => cfg.id === pendingItemId);
       if (targetItem) {
@@ -270,6 +270,18 @@ export default function MaintenanceScreen() {
       }
     }
   }, [pendingItemId, loading]);
+
+  // ── Reload the odometer whenever this screen regains focus (fed by trip.tsx and the 01A6 auto-fetch) ──
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        try {
+          const storedOdometer = await AsyncStorage.getItem(STORAGE_KEY_ODOMETER);
+          if (storedOdometer) setCurrentOdometer(JSON.parse(storedOdometer));
+        } catch (error) {}
+      })();
+    }, [])
+  );
 
   const persistRecords = useCallback(async (next: RecordsMap) => {
     setRecords(next);
@@ -376,7 +388,7 @@ export default function MaintenanceScreen() {
               {isAr ? 'نظرة عامة على صحة السيارة' : 'Vehicle Health Overview'}
             </Text>
             <Text style={[styles.headerSubtitle, { textAlign: isAr ? 'right' : 'left' }]}>
-              {isAr ? `العداد الحالي: ${currentOdometer.toLocaleString()} كم` : `Odometer: ${currentOdometer.toLocaleString()} km (mocked)`}
+              {isAr ? `العداد الحالي: ${currentOdometer.toLocaleString()} كم` : `Odometer: ${currentOdometer.toLocaleString()} km`}
             </Text>
           </View>
         </View>

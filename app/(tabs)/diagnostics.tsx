@@ -566,9 +566,14 @@ export default function DiagnosticsScreen() {
                 })}
               </View>
             ) : (
-              <Text style={{ color: COLORS.textSecondary, textAlign: 'center', marginVertical: 20 }}>
-                {isAr ? 'لا توجد بيانات تعداد التفتيش' : 'No misfire counter data'}
-              </Text>
+              <View style={{ alignItems: 'center', marginVertical: 20, gap: 8 }}>
+                <Ionicons name="construct-outline" size={28} color={COLORS.textTertiary} />
+                <Text style={{ color: COLORS.textSecondary, textAlign: 'center' }}>
+                  {isAr
+                    ? 'بيانات التفتيش غير مدعومة أو غير مطبقة بعد'
+                    : 'Misfire data not supported or not implemented yet'}
+                </Text>
+              </View>
             )}
           </View>
         )}
