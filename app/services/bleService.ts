@@ -64,7 +64,8 @@ const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
 // ── State ──
 let connectedDevice: Device | null = null;
-let obdCharacteristic: Characteristic | null = null;
+let writeCharacteristic: Characteristic | null = null;
+let notifyCharacteristic: Characteristic | null = null;
 let writeWithoutResponseMode = false;
 
 // ── Response buffering: BLE notifications arrive in chunks; ELM327 terminates every reply with '>' ──
@@ -93,7 +94,7 @@ const clearActiveCommand = () => {
 const processQueue = () => {
   if (activeCommand || commandQueue.length === 0) return;
 
-  if (!obdCharacteristic) {
+  if (!writeCharacteristic) {
     while (commandQueue.length) {
       commandQueue.shift()?.reject(new Error('OBD characteristic not available. Device not connected?'));
     }
@@ -112,8 +113,8 @@ const processQueue = () => {
 
   const payload = asciiToBase64(current.command + '\r');
   const writePromise = writeWithoutResponseMode
-    ? obdCharacteristic.writeWithoutResponse(payload)
-    : obdCharacteristic.writeWithResponse(payload);
+    ? writeCharacteristic.writeWithoutResponse(payload)
+    : writeCharacteristic.writeWithResponse(payload);
 
   console.log(`[BLE] > ${current.command}`);
   writePromise.catch((error) => {
@@ -125,9 +126,9 @@ const processQueue = () => {
 
 // ── Single persistent listener; buffers chunks until the '>' prompt closes the reply ──
 const startNotifyListener = () => {
-  if (!obdCharacteristic) return;
+  if (!notifyCharacteristic) return;
   notifySubscription?.remove();
-  notifySubscription = obdCharacteristic.monitor((error, characteristic) => {
+  notifySubscription = notifyCharacteristic.monitor((error, characteristic) => {
     if (error) {
       if (activeCommand) {
         const current = activeCommand;
@@ -209,7 +210,9 @@ const fetchAndSaveTrueOdometer = async (): Promise<void> => {
 };
 
 // ── Dynamically find the UART TX/RX characteristic instead of trusting a hardcoded UUID ──
-const discoverOBDCharacteristic = async (device: Device): Promise<Characteristic | null> => {
+const discoverOBDCharacteristic = async (
+  device: Device
+): Promise<{ writeChar: Characteristic | null; notifyChar: Characteristic | null }> => {
   const services = await device.services();
 
   for (const service of services) {
@@ -222,33 +225,40 @@ const discoverOBDCharacteristic = async (device: Device): Promise<Characteristic
     }
   }
 
-  // Prefer the known FFE0/FFE1 pair by scanning the services/characteristics we already fetched above
+  let writeChar: Characteristic | null = null;
+  let notifyChar: Characteristic | null = null;
+
+  // Prefer the known FFE1 UUID for whichever role(s) it actually supports
   for (const service of services) {
     const characteristics = await service.characteristics();
     for (const char of characteristics) {
-      if (
-        char.uuid.toLowerCase() === OBD_CHARACTERISTIC_UUID.toLowerCase() &&
-        char.isNotifiable &&
-        (char.isWritableWithResponse || char.isWritableWithoutResponse)
-      ) {
-        console.log(`[BLE] Using known characteristic ${char.uuid}`);
-        return char;
+      if (char.uuid.toLowerCase() === OBD_CHARACTERISTIC_UUID.toLowerCase()) {
+        if (!writeChar && (char.isWritableWithResponse || char.isWritableWithoutResponse)) {
+          writeChar = char;
+        }
+        if (!notifyChar && char.isNotifiable) {
+          notifyChar = char;
+        }
       }
     }
   }
 
-  // Fall back to scanning every service for a notifiable + writable characteristic (typical UART bridge)
+  // Fall back to scanning every service for ANY writable / notifiable characteristic (split TX/RX dongles, e.g. FFF1/FFF2)
   for (const service of services) {
     const characteristics = await service.characteristics();
     for (const char of characteristics) {
-      if (char.isNotifiable && (char.isWritableWithResponse || char.isWritableWithoutResponse)) {
-        console.log(`[BLE] Auto-selected characteristic ${char.uuid} on service ${service.uuid}`);
-        return char;
+      if (!writeChar && (char.isWritableWithResponse || char.isWritableWithoutResponse)) {
+        console.log(`[BLE] Auto-selected WRITE characteristic ${char.uuid} on service ${service.uuid}`);
+        writeChar = char;
+      }
+      if (!notifyChar && char.isNotifiable) {
+        console.log(`[BLE] Auto-selected NOTIFY characteristic ${char.uuid} on service ${service.uuid}`);
+        notifyChar = char;
       }
     }
   }
 
-  return null;
+  return { writeChar, notifyChar };
 };
 
 // ── Set the connected device after successful connection ──
@@ -256,16 +266,19 @@ export const setOBDDevice = async (device: Device) => {
   connectedDevice = device;
   await device.discoverAllServicesAndCharacteristics();
   try {
-    const char = await discoverOBDCharacteristic(device);
-    if (!char) {
-      console.error('[BLE] No notifiable + writable characteristic found on this device');
+    const { writeChar, notifyChar } = await discoverOBDCharacteristic(device);
+    if (!writeChar || !notifyChar) {
+      console.error('[BLE] Missing write and/or notify characteristic on this device');
       Alert.alert('BLE Char Error', 'No notifiable/writable characteristic found');
       return;
     }
-    obdCharacteristic = char;
-    writeWithoutResponseMode = !char.isWritableWithResponse && char.isWritableWithoutResponse;
-    console.log(`[BLE] Selected ${char.uuid}, writeWithoutResponse=${writeWithoutResponseMode}`);
-    Alert.alert('BLE Success', 'Found UUID: ' + char.uuid);
+    writeCharacteristic = writeChar;
+    notifyCharacteristic = notifyChar;
+    writeWithoutResponseMode = !writeChar.isWritableWithResponse && writeChar.isWritableWithoutResponse;
+    console.log(
+      `[BLE] Write=${writeChar.uuid} Notify=${notifyChar.uuid}, writeWithoutResponse=${writeWithoutResponseMode}`
+    );
+    Alert.alert('BLE Success', `Write: ${writeChar.uuid}\nNotify: ${notifyChar.uuid}`);
     responseBuffer = '';
     startNotifyListener();
     await initializeELM327();
@@ -332,7 +345,8 @@ export const disconnectBleDevice = async (deviceId: string) => {
       current.reject(new Error('Device disconnected'));
     }
     connectedDevice = null;
-    obdCharacteristic = null;
+    writeCharacteristic = null;
+    notifyCharacteristic = null;
   }
 };
 
@@ -350,7 +364,7 @@ export const isConnected = (): boolean => {
  * @returns The raw response string (hex)
  */
 export const sendOBDCommand = async (command: string, timeoutMs: number = 2000): Promise<string> => {
-  if (!obdCharacteristic) {
+  if (!writeCharacteristic || !notifyCharacteristic) {
     throw new Error('OBD characteristic not available. Device not connected?');
   }
   return queueRawCommand(command, timeoutMs);
