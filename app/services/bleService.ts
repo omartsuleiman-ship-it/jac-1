@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 
 // ── BLE Manager ──
@@ -6,6 +7,9 @@ export const bleManager = new BleManager();
 // ── OBD-II Service & Characteristic UUIDs ──
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
 const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+// ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx / trip.tsx exactly ──
+const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
 // ── State ──
 let connectedDevice: Device | null = null;
@@ -117,6 +121,42 @@ const initializeELM327 = async () => {
   }
 };
 
+// ── Fetch the ECU's true odometer (PID 01A6) and persist it; no-ops safely if the vehicle doesn't support it ──
+const fetchAndSaveTrueOdometer = async (): Promise<void> => {
+  try {
+    const response = await queueRawCommand('01A6', 3000);
+    const upper = response.toUpperCase();
+    if (upper.includes('NO DATA') || upper.includes('ERROR') || upper.includes('UNABLE')) {
+      console.warn('[BLE] True odometer (01A6) not supported by this vehicle');
+      return;
+    }
+
+    const hex = response.replace(/\s/g, '').toUpperCase();
+    const idx = hex.indexOf('41A6');
+    if (idx === -1) {
+      console.warn('[BLE] Unexpected 01A6 response:', response);
+      return;
+    }
+
+    const data = hex.substring(idx + 4);
+    const bytes = data.match(/.{1,2}/g) || [];
+    if (bytes.length < 4) {
+      console.warn('[BLE] 01A6 response too short:', response);
+      return;
+    }
+
+    const [a, b, c, d] = bytes.slice(0, 4).map((byte) => parseInt(byte, 16));
+    const distanceKm = (a * 16777216 + b * 65536 + c * 256 + d) / 10;
+
+    if (!isNaN(distanceKm) && distanceKm > 0) {
+      await AsyncStorage.setItem(STORAGE_KEY_ODOMETER, JSON.stringify(distanceKm));
+      console.log(`[BLE] True odometer saved: ${distanceKm} km`);
+    }
+  } catch (error) {
+    console.warn('[BLE] Failed to fetch true odometer:', error);
+  }
+};
+
 // ── Dynamically find the UART TX/RX characteristic instead of trusting a hardcoded UUID ──
 const discoverOBDCharacteristic = async (device: Device): Promise<Characteristic | null> => {
   const services = await device.services();
@@ -170,6 +210,7 @@ export const setOBDDevice = async (device: Device) => {
     responseBuffer = '';
     startNotifyListener();
     await initializeELM327();
+    await fetchAndSaveTrueOdometer();
   } catch (error) {
     console.error(error);
   }
