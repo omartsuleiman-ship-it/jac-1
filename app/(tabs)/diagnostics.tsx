@@ -47,6 +47,57 @@ const urgencyColor = (tone: 'danger' | 'warning' | 'accent') =>
 const urgencyDim = (tone: 'danger' | 'warning' | 'accent') =>
   tone === 'danger' ? COLORS.dangerDim : tone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
 
+// -----------------------------------------------------------------------------
+// Live Data thresholds — calibrated for a 2016 JAC S3 1.5L NA VVT, ~145,000 km.
+// Ranges are widened slightly vs. factory-new spec to reflect normal wear at
+// this mileage (idle drift, minor injector/vacuum aging, alternator brush wear)
+// without masking genuine faults.
+// -----------------------------------------------------------------------------
+type CardStatus = { tone: 'success' | 'warning' | 'danger'; statusEn: string; statusAr: string };
+
+const getVoltageStatus = (v: number | null): CardStatus => {
+  if (v === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (v < 12.2 || v > 15.5) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (v < 13.5 || v > 14.9) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getCoolantStatus = (c: number | null): CardStatus => {
+  if (c === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (c > 115 || c < 70) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (c > 105 || c < 85) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getRpmStatus = (rpm: number | null): CardStatus => {
+  if (rpm === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (rpm < 500 || rpm > 1300) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (rpm < 650 || rpm > 950) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getMafStatus = (maf: number | null): CardStatus => {
+  if (maf === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (maf < 1.0 || maf > 7.0) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (maf < 1.8 || maf > 5.0) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getO2Status = (o2: number | null): CardStatus => {
+  if (o2 === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (o2 <= 0.05 || o2 >= 0.95) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (o2 < 0.15 || o2 > 0.85) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getFuelTrimStatus = (ft: number | null): CardStatus => {
+  if (ft === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  const abs = Math.abs(ft);
+  if (abs > 15) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (abs > 8) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
 type ViewMode = 'SCANNER' | 'LIVE_DATA' | 'READINESS';
 
 type FaultStatus = 'ready' | 'loading' | 'error';
@@ -360,13 +411,13 @@ export default function DiagnosticsScreen() {
           <View style={styles.liveGrid}>
             <LiveCard
               icon="battery-charging-outline"
-              tone={liveData.voltage !== null && liveData.voltage > 12.5 ? 'success' : 'warning'}
+              tone={getVoltageStatus(liveData.voltage).tone}
               value={liveData.voltage !== null ? liveData.voltage.toFixed(1) : '--'}
               unit="V"
               labelEn="Battery Voltage"
               labelAr="جهد البطارية"
-              statusEn={liveData.voltage !== null && liveData.voltage > 12.5 ? 'Normal' : 'Check'}
-              statusAr={liveData.voltage !== null && liveData.voltage > 12.5 ? 'طبيعي' : 'فحص'}
+              statusEn={getVoltageStatus(liveData.voltage).statusEn}
+              statusAr={getVoltageStatus(liveData.voltage).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -374,13 +425,13 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="thermometer-outline"
-              tone={liveData.coolant !== null && liveData.coolant < 100 ? 'success' : 'warning'}
+              tone={getCoolantStatus(liveData.coolant).tone}
               value={liveData.coolant !== null ? liveData.coolant.toFixed(0) : '--'}
               unit="°C"
               labelEn="Coolant Temp"
               labelAr="حرارة المحرك"
-              statusEn={liveData.coolant !== null && liveData.coolant < 100 ? 'Normal' : 'High'}
-              statusAr={liveData.coolant !== null && liveData.coolant < 100 ? 'طبيعي' : 'مرتفع'}
+              statusEn={getCoolantStatus(liveData.coolant).statusEn}
+              statusAr={getCoolantStatus(liveData.coolant).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -388,13 +439,13 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="speedometer-outline"
-              tone={liveData.rpm !== null ? 'success' : 'warning'}
+              tone={getRpmStatus(liveData.rpm).tone}
               value={liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
               unit="RPM"
               labelEn="Engine Speed"
               labelAr="سرعة المحرك"
-              statusEn={liveData.rpm !== null ? 'Normal' : '--'}
-              statusAr={liveData.rpm !== null ? 'طبيعي' : '--'}
+              statusEn={getRpmStatus(liveData.rpm).statusEn}
+              statusAr={getRpmStatus(liveData.rpm).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -402,13 +453,13 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="flash-outline"
-              tone={liveData.maf !== null ? 'success' : 'warning'}
+              tone={getMafStatus(liveData.maf).tone}
               value={liveData.maf !== null ? liveData.maf.toFixed(1) : '--'}
               unit="g/s"
               labelEn="MAF Air Flow"
               labelAr="تدفق الهواء"
-              statusEn={liveData.maf !== null ? 'Normal' : '--'}
-              statusAr={liveData.maf !== null ? 'طبيعي' : '--'}
+              statusEn={getMafStatus(liveData.maf).statusEn}
+              statusAr={getMafStatus(liveData.maf).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -416,13 +467,13 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="analytics-outline"
-              tone={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'success' : 'warning'}
+              tone={getO2Status(liveData.o2).tone}
               value={liveData.o2 !== null ? liveData.o2.toFixed(2) : '--'}
               unit="V"
               labelEn="O2 Sensor"
               labelAr="حساس الأكسجين"
-              statusEn={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'Normal' : 'Check'}
-              statusAr={liveData.o2 !== null && liveData.o2 > 0.1 && liveData.o2 < 0.9 ? 'طبيعي' : 'فحص'}
+              statusEn={getO2Status(liveData.o2).statusEn}
+              statusAr={getO2Status(liveData.o2).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -448,13 +499,13 @@ export default function DiagnosticsScreen() {
             />
             <LiveCard
               icon="options-outline"
-              tone={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'success' : 'warning'}
+              tone={getFuelTrimStatus(liveData.fuelTrim).tone}
               value={liveData.fuelTrim !== null ? liveData.fuelTrim.toFixed(1) : '--'}
               unit="%"
               labelEn="Fuel Trim"
               labelAr="ضبط الوقود"
-              statusEn={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'Normal' : 'Check'}
-              statusAr={liveData.fuelTrim !== null && Math.abs(liveData.fuelTrim) < 5 ? 'طبيعي' : 'فحص'}
+              statusEn={getFuelTrimStatus(liveData.fuelTrim).statusEn}
+              statusAr={getFuelTrimStatus(liveData.fuelTrim).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
@@ -750,7 +801,7 @@ function LiveCard({
   isWaiting = false,
 }: {
   icon: any;
-  tone: 'success' | 'warning' | 'accent';
+  tone: 'success' | 'warning' | 'danger' | 'accent';
   value: string;
   unit: string;
   labelEn: string;
@@ -765,8 +816,16 @@ function LiveCard({
 }) {
   // Determine the actual tone to display (waiting overrides to neutral)
   const displayTone = isWaiting ? 'warning' : tone;
-  const color = displayTone === 'success' ? COLORS.success : displayTone === 'warning' ? COLORS.warning : COLORS.accent;
-  const dimColor = displayTone === 'success' ? COLORS.successDim : displayTone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
+  const color =
+    displayTone === 'success' ? COLORS.success :
+    displayTone === 'warning' ? COLORS.warning :
+    displayTone === 'danger' ? COLORS.danger :
+    COLORS.accent;
+  const dimColor =
+    displayTone === 'success' ? COLORS.successDim :
+    displayTone === 'warning' ? COLORS.warningDim :
+    displayTone === 'danger' ? COLORS.dangerDim :
+    COLORS.accentDim;
 
   // Determine status text to show
   let displayStatusEn = statusEn;

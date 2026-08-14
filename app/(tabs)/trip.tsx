@@ -44,7 +44,7 @@ const DEFAULT_REGION: Region = {
   longitudeDelta: 0.1,
 };
 
-const OSRM_BASE_URL = 'http://router.project-osrm.org/route/v1/driving';
+const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
 
 // ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx exactly ──
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';

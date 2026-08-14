@@ -374,20 +374,27 @@ export const sendOBDCommand = async (command: string, timeoutMs: number = 2000):
  * Parse Mode 03 response to extract DTC codes (7-digit hex).
  */
 export const parseDTCs = (response: string): string[] => {
-  const hexPart = response.replace(/\s/g, '');
-  const idx = hexPart.indexOf('43');
-  if (idx === -1) return [];
-  const payload = hexPart.substring(idx + 2);
-  const dtcBytes = payload.match(/.{1,2}/g) || [];
+  // فصل كل سطر لوحده (ممكن أكتر من ECU يردوا على نفس الطلب) وامسح أي سطر فيه نويز مش hex نضيف
+  const lines = response
+    .split(/[\r\n]+/)
+    .map((line) => line.replace(/\s/g, '').toUpperCase())
+    .filter((line) => line.length > 0 && /^[0-9A-F]+$/.test(line));
+
   const codes: string[] = [];
-  for (let i = 0; i < dtcBytes.length; i += 2) {
-    if (i + 1 >= dtcBytes.length) break;
-    const byte1 = parseInt(dtcBytes[i], 16);
-    const byte2 = parseInt(dtcBytes[i + 1], 16);
-    const code = byteToDTC(byte1, byte2);
-    if (code) codes.push(code);
+  for (const hexPart of lines) {
+    const idx = hexPart.indexOf('43');
+    if (idx === -1) continue;
+    const payload = hexPart.substring(idx + 2);
+    const dtcBytes = payload.match(/.{1,2}/g) || [];
+    for (let i = 0; i + 1 < dtcBytes.length; i += 2) {
+      const byte1 = parseInt(dtcBytes[i], 16);
+      const byte2 = parseInt(dtcBytes[i + 1], 16);
+      if (byte1 === 0 && byte2 === 0) continue; // بايتات padding فاضية
+      const code = byteToDTC(byte1, byte2);
+      if (code) codes.push(code);
+    }
   }
-  return codes;
+  return [...new Set(codes)];
 };
 
 const byteToDTC = (b1: number, b2: number): string | null => {
@@ -411,12 +418,21 @@ export const getDTCs = async (): Promise<string[]> => {
 };
 
 export const getLiveData = async () => {
-  const rpm = await requestPID('010C');
-  const coolant = await requestPID('0105');
-  const voltage = await requestPID('0142');
-  const maf = await requestPID('0110');
-  const o2 = await requestPID('0114');
-  const fuelTrim = await requestPID('0106');
+  const safeRequest = async (pid: string): Promise<number | null> => {
+    try {
+      return await requestPID(pid);
+    } catch (error) {
+      console.warn(`[BLE] Live data PID ${pid} failed:`, error);
+      return null;
+    }
+  };
+
+  const rpm = await safeRequest('010C');
+  const coolant = await safeRequest('0105');
+  const voltage = await safeRequest('0142');
+  const maf = await safeRequest('0110');
+  const o2 = await safeRequest('0114');
+  const fuelTrim = await safeRequest('0106');
 
   return {
     rpm,
@@ -431,7 +447,10 @@ export const getLiveData = async () => {
 const requestPID = async (pid: string): Promise<number> => {
   const response = await sendOBDCommand(pid);
   const hex = response.replace(/\s/g, '').toUpperCase();
-  const expected = pid.toUpperCase();
+  // الـECU بيرد بـ (mode + 0x40) مش بنفس بايتات الطلب — مثلاً طلب '010C' يرجع رد يبدأ بـ '410C'
+  const modeByte = parseInt(pid.substring(0, 2), 16);
+  const responseMode = (modeByte + 0x40).toString(16).toUpperCase().padStart(2, '0');
+  const expected = responseMode + pid.substring(2).toUpperCase();
   const idx = hex.indexOf(expected);
   if (idx === -1) return 0;
   const data = hex.substring(idx + expected.length);
@@ -465,7 +484,7 @@ const requestPID = async (pid: string): Promise<number> => {
 export const getReadiness = async () => {
   const response = await sendOBDCommand('0101');
   const hex = response.replace(/\s/g, '').toUpperCase();
-  const idx = hex.indexOf('0101');
+  const idx = hex.indexOf('4101'); // الرد بيبدأ بـ '41 01 ...' مش بصدى الطلب '01 01'
   if (idx === -1) return {
     misfire: false,
     fuel: false,
@@ -476,17 +495,33 @@ export const getReadiness = async () => {
   const data = hex.substring(idx + 4);
   const bytes = data.match(/.{1,2}/g) || [];
   const numbers = bytes.map(b => parseInt(b, 16));
-  const b0 = numbers[0] || 0;
-  const b1 = numbers[1] || 0;
+
+  // Byte A = numbers[0] (MIL + DTC count) — غير مستخدم هنا
+  const byteB = numbers[1] || 0; // continuous monitors: bit0=misfire support, bit1=fuel support, bit4=misfire not-ready, bit5=fuel not-ready
+  const byteC = numbers[2] || 0; // non-continuous monitors: supported bits
+  const byteD = numbers[3] || 0; // non-continuous monitors: not-ready bits (نفس مواضع byteC)
+
+  const misfireSupported = (byteB & 0x01) !== 0;
+  const misfireNotReady = (byteB & 0x10) !== 0;
+  const fuelSupported = (byteB & 0x02) !== 0;
+  const fuelNotReady = (byteB & 0x20) !== 0;
+
+  const catalystSupported = (byteC & 0x01) !== 0;
+  const catalystNotReady = (byteD & 0x01) !== 0;
+  const evapSupported = (byteC & 0x04) !== 0;
+  const evapNotReady = (byteD & 0x04) !== 0;
+  const o2Supported = (byteC & 0x20) !== 0;
+  const o2NotReady = (byteD & 0x20) !== 0;
+
+  // لو المونيتور مش مدعوم أصلاً في العربية دي، بنعتبره "جاهز" (true) بدل ما يفضل شكله عطلان
   return {
-    misfire: (b0 & 0x80) !== 0,
-    fuel: (b0 & 0x40) !== 0,
-    catalyst: (b0 & 0x20) !== 0,
-    evap: (b1 & 0x01) !== 0,
-    o2sensor: (b1 & 0x04) !== 0,
+    misfire: misfireSupported ? !misfireNotReady : true,
+    fuel: fuelSupported ? !fuelNotReady : true,
+    catalyst: catalystSupported ? !catalystNotReady : true,
+    evap: evapSupported ? !evapNotReady : true,
+    o2sensor: o2Supported ? !o2NotReady : true,
   };
 };
-
 export const getMisfireCounters = async (): Promise<null> => {
   // Mode $06 (TID/CID misfire counters) is not implemented for this dongle/protocol yet.
   // Return null — never fabricated numbers — so the UI can honestly show "not supported / not implemented".
