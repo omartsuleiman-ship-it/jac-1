@@ -19,6 +19,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { isConnected, sendOBDCommand } from '../services/bleService';
 import { useLang } from './_layout'; // ── استدعاء اللغة ──
 
 const COLORS = {
@@ -85,6 +86,18 @@ const MAINTENANCE_CONFIG: MaintenanceConfig[] = [
 
 const STORAGE_KEY_RECORDS = '@car_app/maintenance_records_v1';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
+
+// ── Read-only odometer probes. These only REQUEST data — no Security Access
+// (Seed/Key) sequence is ever sent. If the ECU replies "7F 22 33" (Security
+// Access Denied) or "NO DATA", we report that and stop; we never attempt to
+// bypass it. ──
+type OdometerProbe = { label: string; setup?: string; command: string };
+const ODOMETER_PROBES: OdometerProbe[] = [
+  { label: 'Standard PID 01 A6 (Odometer)', command: '01A6' },
+  { label: 'UDS DID 22 A6 (via ECU header 7E0)', setup: 'ATSH7E0', command: '22A6' },
+  { label: 'UDS DID 22 D0 01 (via ECU header 7E0)', setup: 'ATSH7E0', command: '22D001' },
+  { label: 'UDS DID 22 4A 24 (via ECU header 7E0)', setup: 'ATSH7E0', command: '224A24' },
+];
 
 const ASSUMED_DAILY_KM = 40;
 
@@ -218,12 +231,14 @@ export default function MaintenanceScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MaintenanceConfig | null>(null);
 
-  const [odometerInput, setOdometerInput] = useState('');
+  const [odometerModalVisible, setOdometerModalVisible] = useState(false);
+  const [odometerModalInput, setOdometerModalInput] = useState('');
   const [selectedLifespan, setSelectedLifespan] = useState<number | 'custom' | null>(null);
   const [customLifespanInput, setCustomLifespanInput] = useState('');
   const [thresholdInput, setThresholdInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
+  const [checkingOdometer, setCheckingOdometer] = useState(false);
 
   const responseListener = useRef<Notifications.EventSubscription | null>(null);
 
@@ -300,7 +315,6 @@ export default function MaintenanceScreen() {
   const openLogModal = (item: MaintenanceConfig) => {
     const existing = records[item.id];
     setSelectedItem(item);
-    setOdometerInput(currentOdometer.toString());
     setSelectedLifespan(existing?.lifespanValue ?? item.options[0]);
     setCustomLifespanInput('');
     setThresholdInput(existing ? existing.notificationThreshold.toString() : '');
@@ -312,18 +326,103 @@ export default function MaintenanceScreen() {
     setSelectedItem(null);
   };
 
+  const openOdometerModal = () => {
+    setOdometerModalInput(currentOdometer.toString());
+    setOdometerModalVisible(true);
+  };
+
+  const closeOdometerModal = () => {
+    setOdometerModalVisible(false);
+  };
+
+  const handleSaveOdometer = async () => {
+    const value = parseInt(odometerModalInput, 10);
+    if (isNaN(value) || value < 0) {
+      Alert.alert(
+        isAr ? 'إدخال خاطئ' : 'Invalid Input',
+        isAr ? 'الرجاء إدخال قراءة عداد صحيحة.' : 'Please enter a valid odometer reading.'
+      );
+      return;
+    }
+    if (value < currentOdometer) {
+      Alert.alert(
+        isAr ? 'تأكيد' : 'Confirm',
+        isAr
+          ? `القراءة الجديدة (${value.toLocaleString()}) أقل من القراءة الحالية (${currentOdometer.toLocaleString()}). متابعة؟`
+          : `The new reading (${value.toLocaleString()}) is lower than the current one (${currentOdometer.toLocaleString()}). Continue anyway?`,
+        [
+          { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+          {
+            text: isAr ? 'متابعة' : 'Continue',
+            style: 'destructive',
+            onPress: async () => {
+              await persistOdometer(value);
+              closeOdometerModal();
+            },
+          },
+        ]
+      );
+      return;
+    }
+    await persistOdometer(value);
+    closeOdometerModal();
+  };
+
+  const handleCheckOdometerAccess = async () => {
+    if (!isConnected()) {
+      Alert.alert(
+        isAr ? 'غير متصل' : 'Not Connected',
+        isAr ? 'من فضلك اتصل بجهاز الـ OBD أولاً من تاب البلوتوث.' : 'Please connect to the OBD dongle first from the Bluetooth tab.'
+      );
+      return;
+    }
+
+    setCheckingOdometer(true);
+    const results: { label: string; response: string; success: boolean }[] = [];
+
+    try {
+      for (const probe of ODOMETER_PROBES) {
+        try {
+          if (probe.setup) {
+            await sendOBDCommand(probe.setup);
+          }
+          const raw = await sendOBDCommand(probe.command);
+          const hex = raw.replace(/[\s>]/g, '').toUpperCase();
+          const isNoData = hex.length === 0 || hex.includes('NODATA') || hex.includes('SEARCHING');
+          const isNegativeResponse = hex.startsWith('7F'); // includes Security Access Denied (7F 22 33)
+          const success = !isNoData && !isNegativeResponse;
+
+          results.push({ label: probe.label, response: raw.trim() || (isAr ? 'لا رد' : 'no reply'), success });
+
+          if (success) break; // لقينا رد صالح — نوقف، مفيش داعي نكمل باقي المحاولات
+        } catch {
+          results.push({ label: probe.label, response: isAr ? 'فشل الإرسال' : 'send failed', success: false });
+        }
+      }
+    } finally {
+      setCheckingOdometer(false);
+    }
+
+    const working = results.find((r) => r.success);
+    const summary = results
+      .map((r) => `${r.success ? '✅' : '❌'} ${r.label}\n   → ${r.response}`)
+      .join('\n\n');
+
+    Alert.alert(
+      working
+        ? (isAr ? '✅ العداد متاح للقراءة تلقائياً' : '✅ Odometer is readable automatically')
+        : (isAr ? '❌ العداد محمي أو غير مدعوم بهذه الطريقة' : '❌ Odometer is protected or unsupported this way'),
+      summary
+    );
+  };
+
   const handleSaveService = async () => {
     if (!selectedItem) return;
 
-    const odometerValue = parseInt(odometerInput, 10);
     const lifespanValue =
       selectedLifespan === 'custom' ? parseInt(customLifespanInput, 10) : selectedLifespan;
     const thresholdValue = parseInt(thresholdInput, 10);
 
-    if (selectedItem.unit === 'km' && (isNaN(odometerValue) || odometerValue < 0)) {
-      Alert.alert(isAr ? 'إدخال خاطئ' : 'Invalid Input', isAr ? 'الرجاء إدخال قراءة عداد صحيحة.' : 'Please enter a valid odometer reading.');
-      return;
-    }
     if (!lifespanValue || isNaN(lifespanValue) || lifespanValue <= 0) {
       Alert.alert(isAr ? 'إدخال خاطئ' : 'Invalid Input', isAr ? 'الرجاء اختيار عمر افتراضي صحيح.' : 'Please choose or enter a valid lifespan.');
       return;
@@ -344,7 +443,7 @@ export default function MaintenanceScreen() {
       const newRecord: MaintenanceRecord = {
         itemId: selectedItem.id,
         lifespanValue,
-        loggedAtOdometer: selectedItem.unit === 'km' ? odometerValue : currentOdometer,
+        loggedAtOdometer: currentOdometer,
         loggedAtDate: new Date().toISOString(),
         notificationThreshold: thresholdValue,
       };
@@ -359,10 +458,6 @@ export default function MaintenanceScreen() {
 
       const nextRecords: RecordsMap = { ...records, [selectedItem.id]: newRecord };
       await persistRecords(nextRecords);
-
-      if (selectedItem.unit === 'km' && odometerValue > currentOdometer) {
-        await persistOdometer(odometerValue);
-      }
 
       closeModal();
     } finally {
@@ -381,7 +476,11 @@ export default function MaintenanceScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        <View style={[styles.headerCard, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
+        <TouchableOpacity
+          style={[styles.headerCard, { flexDirection: isAr ? 'row-reverse' : 'row' }]}
+          onPress={openOdometerModal}
+          activeOpacity={0.7}
+        >
           <Ionicons name="car-sport-outline" size={22} color={COLORS.accent} />
           <View style={{ marginHorizontal: 10, flex: 1 }}>
             <Text style={[styles.headerTitle, { textAlign: isAr ? 'right' : 'left' }]}>
@@ -391,6 +490,44 @@ export default function MaintenanceScreen() {
               {isAr ? `العداد الحالي: ${currentOdometer.toLocaleString()} كم` : `Odometer: ${currentOdometer.toLocaleString()} km`}
             </Text>
           </View>
+          <Ionicons name="create-outline" size={18} color={COLORS.textSecondary} />
+        </TouchableOpacity>
+
+        <View style={styles.card}>
+          <View style={[styles.cardTopRow, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
+            <View style={styles.iconCircle}>
+              <Ionicons name="help-buoy-outline" size={20} color={COLORS.accent} />
+            </View>
+            <View style={{ flex: 1, marginHorizontal: 12 }}>
+              <Text style={[styles.itemLabel, { textAlign: isAr ? 'right' : 'left' }]}>
+                {isAr ? 'فحص إمكانية قراءة العداد تلقائياً' : 'Check Automatic Odometer Access'}
+              </Text>
+              <Text style={[styles.itemSubtext, { textAlign: isAr ? 'right' : 'left' }]}>
+                {isAr
+                  ? 'يرسل أوامر قراءة فقط ليتأكد هل السيارة بتسمح بقراءة العداد تلقائياً أم لا'
+                  : 'Sends read-only probes to check whether the car exposes the odometer automatically'}
+              </Text>
+            </View>
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.saveButton,
+              checkingOdometer && styles.saveButtonDisabled,
+              { flexDirection: isAr ? 'row-reverse' : 'row', marginTop: 4 },
+            ]}
+            onPress={handleCheckOdometerAccess}
+            disabled={checkingOdometer}
+            activeOpacity={0.85}
+          >
+            {checkingOdometer ? (
+              <ActivityIndicator color="#0B0D10" size="small" />
+            ) : (
+              <>
+                <Ionicons name="search-outline" size={18} color="#0B0D10" />
+                <Text style={styles.saveButtonText}>{isAr ? 'ابدأ الفحص' : 'Run Check'}</Text>
+              </>
+            )}
+          </TouchableOpacity>
         </View>
 
         {MAINTENANCE_CONFIG.map((item) => {
@@ -467,25 +604,6 @@ export default function MaintenanceScreen() {
                       <Ionicons name="close" size={22} color={COLORS.textSecondary} />
                     </TouchableOpacity>
                   </View>
-
-                  {selectedItem.unit === 'km' && (
-                    <View style={styles.fieldGroup}>
-                      <Text style={[styles.fieldLabel, { textAlign: isAr ? 'right' : 'left' }]}>
-                        {isAr ? 'قراءة العداد الحالية (كم)' : 'Current Odometer Reading (km)'}
-                      </Text>
-                      <Text style={[styles.fieldHint, { textAlign: isAr ? 'right' : 'left' }]}>
-                        {isAr ? 'وهمي حالياً — سيتم ملؤه تلقائياً بواسطة اتصال الـ OBD.' : 'Mocked for now — this will be auto-filled by the live OBD connection.'}
-                      </Text>
-                      <TextInput
-                        style={[styles.input, { textAlign: isAr ? 'right' : 'left' }]}
-                        keyboardType="numeric"
-                        placeholder={isAr ? "مثال: 45230" : "e.g. 45230"}
-                        placeholderTextColor={COLORS.textSecondary}
-                        value={odometerInput}
-                        onChangeText={setOdometerInput}
-                      />
-                    </View>
-                  )}
 
                   <View style={styles.fieldGroup}>
                     <Text style={[styles.fieldLabel, { textAlign: isAr ? 'right' : 'left' }]}>
@@ -575,6 +693,59 @@ export default function MaintenanceScreen() {
                   </TouchableOpacity>
                 </ScrollView>
               )}
+            </Pressable>
+          </Pressable>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* MASTER ODOMETER MODAL */}
+      {/* ------------------------------------------------------------------ */}
+      <Modal visible={odometerModalVisible} animationType="slide" transparent onRequestClose={closeOdometerModal}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <Pressable style={styles.modalOverlay} onPress={closeOdometerModal}>
+            <Pressable style={styles.modalSheet} onPress={(e) => e.stopPropagation()}>
+              <View style={styles.modalHandle} />
+              <View style={[styles.modalHeaderRow, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
+                <View style={styles.iconCircle}>
+                  <Ionicons name="speedometer-outline" size={20} color={COLORS.accent} />
+                </View>
+                <Text style={[styles.modalTitle, { textAlign: isAr ? 'right' : 'left' }]}>
+                  {isAr ? 'تحديث قراءة العداد' : 'Update Odometer Reading'}
+                </Text>
+                <TouchableOpacity onPress={closeOdometerModal} hitSlop={10}>
+                  <Ionicons name="close" size={22} color={COLORS.textSecondary} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.fieldGroup}>
+                <Text style={[styles.fieldLabel, { textAlign: isAr ? 'right' : 'left' }]}>
+                  {isAr ? 'قراءة العداد الحالية (كم)' : 'Current Odometer Reading (km)'}
+                </Text>
+                <Text style={[styles.fieldHint, { textAlign: isAr ? 'right' : 'left' }]}>
+                  {isAr
+                    ? 'هذه القراءة الرئيسية تُستخدم تلقائياً في جميع بطاقات الصيانة.'
+                    : 'This master reading automatically drives every maintenance card.'}
+                </Text>
+                <TextInput
+                  style={[styles.input, { textAlign: isAr ? 'right' : 'left' }]}
+                  keyboardType="numeric"
+                  placeholder={isAr ? 'مثال: 45230' : 'e.g. 45230'}
+                  placeholderTextColor={COLORS.textSecondary}
+                  value={odometerModalInput}
+                  onChangeText={setOdometerModalInput}
+                  autoFocus
+                />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.saveButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]}
+                onPress={handleSaveOdometer}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="checkmark-circle-outline" size={19} color="#0B0D10" />
+                <Text style={styles.saveButtonText}>{isAr ? 'حفظ القراءة' : 'Save Reading'}</Text>
+              </TouchableOpacity>
             </Pressable>
           </Pressable>
         </KeyboardAvoidingView>

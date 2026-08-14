@@ -1,9 +1,12 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
 import { router } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   ImageBackground,
+  Linking,
   Platform,
   SafeAreaView,
   StatusBar,
@@ -28,8 +31,9 @@ export default function HomeScreen() {
   const { isAr } = useLang();
   const [greeting, setGreeting] = useState('');
   
-  // ── Double Tap Logic ──
-  const lastTapRef = useRef<number>(0);
+  // ── Live Trip State ──
+  const [isTripActive, setIsTripActive] = useState(false);
+  const [liveTripCost, setLiveTripCost] = useState('0.00');
 
   useEffect(() => {
     const currentHour = new Date().getHours();
@@ -44,34 +48,84 @@ export default function HomeScreen() {
     }
   }, [isAr]);
 
-  // ── Face ID & Double Tap Handler ──
-  const handleDoubleTap = async () => {
-    const now = Date.now();
-    const DOUBLE_PRESS_DELAY = 400; // 400ms window for double tap
-    if (now - lastTapRef.current < DOUBLE_PRESS_DELAY) {
+  // ── Polling for Live Trip Cost ──
+  useEffect(() => {
+    const pollTripData = async () => {
       try {
-        const hasHardware = await LocalAuthentication.hasHardwareAsync();
-        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
-        
-        if (hasHardware && isEnrolled) {
-          const result = await LocalAuthentication.authenticateAsync({
-            promptMessage: isAr ? 'افتح قفل لوحة الرحلات والتكلفة' : 'Unlock Trip & Cost Panel',
-            fallbackLabel: isAr ? 'استخدام الرمز السري' : 'Use Passcode',
-            cancelLabel: isAr ? 'إلغاء' : 'Cancel',
-          });
-          
-          if (result.success) {
-            router.push('/(tabs)/trip');
-          }
+        const active = await AsyncStorage.getItem('@trip_active');
+        if (active === 'true') {
+          setIsTripActive(true);
+          const cost = await AsyncStorage.getItem('@live_trip_cost');
+          setLiveTripCost(cost || '0.00');
         } else {
-          // If simulator or no Face ID setup, bypass gracefully
+          setIsTripActive(false);
+        }
+      } catch (e) {}
+    };
+    pollTripData();
+    const interval = setInterval(pollTripData, 2000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── Single Tap Vault Handler ──
+  const handleUnlockTrips = async () => {
+    try {
+      const hasHardware = await LocalAuthentication.hasHardwareAsync();
+      const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+      
+      if (hasHardware && isEnrolled) {
+        const result = await LocalAuthentication.authenticateAsync({
+          promptMessage: isAr ? 'افتح قفل لوحة الرحلات والتكلفة' : 'Unlock Trip & Cost Panel',
+          fallbackLabel: isAr ? 'استخدام الرمز السري' : 'Use Passcode',
+          cancelLabel: isAr ? 'إلغاء' : 'Cancel',
+        });
+        
+        if (result.success) {
           router.push('/(tabs)/trip');
         }
-      } catch (error) {
-        console.warn('Authentication error:', error);
+      } else {
+        router.push('/(tabs)/trip');
       }
+    } catch (error) {
+      console.warn('Authentication error:', error);
     }
-    lastTapRef.current = now;
+  };
+
+  // ── Last Parked -> Google Maps Handler ──
+  const handleLastParkedPress = async () => {
+    try {
+      const hasHardware = await LocalAuthentication.hasHardwareAsync();
+      const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+      
+      if (hasHardware && isEnrolled) {
+        const result = await LocalAuthentication.authenticateAsync({
+          promptMessage: isAr ? 'افتح قفل الموقع للتوجه للسيارة' : 'Unlock to view parked location',
+          fallbackLabel: isAr ? 'استخدام الرمز السري' : 'Use Passcode',
+          cancelLabel: isAr ? 'إلغاء' : 'Cancel',
+        });
+        if (!result.success) return; // المستخدم ألغى البصمة
+      }
+
+      // إحداثيات (مجاورة 46، العاشر من رمضان) كمثال حالي لحد ما نربطها بحفظ موقع الركنة
+      const lat = 30.2858;
+      const lng = 31.7431;
+      
+      // توجيه لجوجل مابس بوضعية "المشي"
+      const url = Platform.OS === 'ios'
+        ? `comgooglemaps://?saddr=&daddr=${lat},${lng}&directionsmode=walking`
+        : `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`;
+      
+      Linking.canOpenURL(url).then((supported) => {
+        if (supported) {
+          Linking.openURL(url);
+        } else {
+          // لو تطبيق جوجل مابس مش متسطب، يفتح المتصفح
+          Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`);
+        }
+      });
+    } catch (e) {
+      console.warn(e);
+    }
   };
 
   return (
@@ -86,7 +140,6 @@ export default function HomeScreen() {
         <View style={styles.overlay}>
           <SafeAreaView style={styles.safeArea}>
             
-            {/* Top Bar: Replaced Menu with Bluetooth Status Pill */}
             <View style={[styles.topBar, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
               <View style={[styles.btPill, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
                 <View style={styles.btDot} />
@@ -134,6 +187,22 @@ export default function HomeScreen() {
                   </View>
                 </View>
 
+                {/* Live Trip Cost (Appears ONLY when trip is running) */}
+                {isTripActive && (
+                  <View style={[styles.widgetFull, { flexDirection: isAr ? 'row-reverse' : 'row', alignItems: 'center', justifyContent: 'space-between', borderColor: COLORS.accent, backgroundColor: 'rgba(0, 217, 198, 0.05)' }]}>
+                    <View style={{ flexDirection: isAr ? 'row-reverse' : 'row', alignItems: 'center', gap: 12 }}>
+                      <View style={[styles.healthIconWrap, { backgroundColor: 'rgba(0, 217, 198, 0.15)' }]}>
+                        <Ionicons name="cash-outline" size={20} color={COLORS.accent} />
+                      </View>
+                      <View style={{ alignItems: isAr ? 'flex-end' : 'flex-start' }}>
+                        <Text style={styles.widgetTitle}>{isAr ? 'تكلفة الرحلة الحالية' : 'Live Trip Cost'}</Text>
+                        <Text style={[styles.widgetValue, { color: COLORS.accent }]}>{liveTripCost} <Text style={styles.widgetUnit}>{isAr ? 'جنيه' : 'EGP'}</Text></Text>
+                      </View>
+                    </View>
+                    <ActivityIndicator color={COLORS.accent} size="small" />
+                  </View>
+                )}
+
                 <View style={[styles.rowWidgets, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
                   {/* Eco Score */}
                   <View style={[styles.widgetHalf, { alignItems: isAr ? 'flex-end' : 'flex-start' }]}>
@@ -142,14 +211,18 @@ export default function HomeScreen() {
                     <Text style={styles.widgetValue}>96<Text style={styles.widgetUnit}>/100</Text></Text>
                   </View>
 
-                  {/* Last Parked */}
-                  <View style={[styles.widgetHalf, { alignItems: isAr ? 'flex-end' : 'flex-start' }]}>
-                    <Ionicons name="pin-outline" size={22} color={COLORS.accent} style={{ marginBottom: 6 }} />
+                  {/* Last Parked (Now a Button with Face ID) */}
+                  <TouchableOpacity 
+                    style={[styles.widgetHalf, { alignItems: isAr ? 'flex-end' : 'flex-start', borderColor: 'rgba(255, 107, 94, 0.3)' }]} 
+                    activeOpacity={0.7} 
+                    onPress={handleLastParkedPress}
+                  >
+                    <Ionicons name="pin-outline" size={22} color={COLORS.danger} style={{ marginBottom: 6 }} />
                     <Text style={styles.widgetTitle}>{isAr ? 'آخر ركنة' : 'Last Parked'}</Text>
                     <Text style={[styles.widgetValue, { fontSize: 13, marginTop: 4 }]} numberOfLines={1}>
                       {isAr ? 'مجاورة 46' : 'Mogawra 46'}
                     </Text>
-                  </View>
+                  </TouchableOpacity>
                 </View>
 
                 {/* Maintenance Progress */}
@@ -161,7 +234,6 @@ export default function HomeScreen() {
                   <Text style={[styles.widgetValue, { fontSize: 15, marginBottom: 8 }]}>
                     {isAr ? 'باقي ٤,٥٠٠ كم' : '4,500 km remaining'}
                   </Text>
-                  {/* Progress Bar */}
                   <View style={styles.progressBarTrack}>
                     <View style={[styles.progressBarFill, { width: '85%' }]} />
                   </View>
@@ -169,16 +241,16 @@ export default function HomeScreen() {
 
               </View>
 
-              {/* ── Double Tap Vault Button ── */}
+              {/* ── Single Tap Vault Button ── */}
               <View style={{ flex: 1, justifyContent: 'flex-end', width: '100%', paddingBottom: 20 }}>
                 <TouchableOpacity 
-                  activeOpacity={0.7} 
-                  onPress={handleDoubleTap}
+                  activeOpacity={0.8} 
+                  onPress={handleUnlockTrips}
                   style={styles.vaultButton}
                 >
                   <Ionicons name="lock-closed-outline" size={20} color={COLORS.accent} />
                   <Text style={styles.vaultText}>
-                    {isAr ? 'اضغط مرتين لفتح سجل الرحلات' : 'Double tap to unlock Trips'}
+                    {isAr ? 'اضغط لفتح سجل الرحلات' : 'Tap to unlock Trips'}
                   </Text>
                 </TouchableOpacity>
               </View>
