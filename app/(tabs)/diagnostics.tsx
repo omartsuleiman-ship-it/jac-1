@@ -13,8 +13,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected, sendOBDCommand } from '../services/bleService';
+import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -42,10 +43,10 @@ const COLORS = {
   overlay: 'rgba(0,0,0,0.72)',
 };
 
-const urgencyColor = (tone: 'danger' | 'warning' | 'accent') =>
-  tone === 'danger' ? COLORS.danger : tone === 'warning' ? COLORS.warning : COLORS.accent;
-const urgencyDim = (tone: 'danger' | 'warning' | 'accent') =>
-  tone === 'danger' ? COLORS.dangerDim : tone === 'warning' ? COLORS.warningDim : COLORS.accentDim;
+const urgencyColor = (tone: 'danger' | 'warning' | 'accent' | 'success') =>
+  tone === 'danger' ? COLORS.danger : tone === 'warning' ? COLORS.warning : tone === 'success' ? COLORS.success : COLORS.accent;
+const urgencyDim = (tone: 'danger' | 'warning' | 'accent' | 'success') =>
+  tone === 'danger' ? COLORS.dangerDim : tone === 'warning' ? COLORS.warningDim : tone === 'success' ? COLORS.successDim : COLORS.accentDim;
 
 // -----------------------------------------------------------------------------
 // Live Data thresholds — calibrated for a 2016 JAC S3 1.5L NA VVT, ~145,000 km.
@@ -249,7 +250,7 @@ export default function DiagnosticsScreen() {
 
   // Poll live data when the tab is active
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
     if (activeView === 'LIVE_DATA') {
       fetchLiveData(true); // Load only on the very first fetch
       interval = setInterval(() => fetchLiveData(false), 1000); // Silent updates thereafter
@@ -416,22 +417,59 @@ export default function DiagnosticsScreen() {
 
         {activeView === 'LIVE_DATA' && (
           <View style={styles.liveGrid}>
-            {/* RPM Card - Big/Full Width at the top */}
-            <LiveCard
-              fullWidth
-              icon="speedometer-outline"
-              tone={getRpmStatus(liveData.rpm).tone}
-              value={liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
-              unit="RPM"
-              labelEn="Engine Speed"
-              labelAr="سرعة المحرك"
-              statusEn={getRpmStatus(liveData.rpm).statusEn}
-              statusAr={getRpmStatus(liveData.rpm).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={liveData.rpm === null}
-            />
+            {/* ── 3D Interactive RPM Gauge ── */}
+            <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
+              <View style={{ width: '100%', flexDirection: dir, justifyContent: 'space-between', position: 'absolute', top: 16, paddingHorizontal: 16 }}>
+                <View style={[styles.statusBadge, { backgroundColor: liveData.rpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(liveData.rpm).tone), flexDirection: dir }]}>
+                  <View style={[styles.miniDot, { backgroundColor: liveData.rpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(liveData.rpm).tone) }]} />
+                  <Text style={[styles.statusBadgeText, { color: liveData.rpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(liveData.rpm).tone) }]}>
+                    {liveData.rpm === null ? (isAr ? 'بانتظار...' : 'Waiting...') : isAr ? getRpmStatus(liveData.rpm).statusAr : getRpmStatus(liveData.rpm).statusEn}
+                  </Text>
+                </View>
+                <Ionicons name="speedometer-outline" size={20} color={COLORS.textTertiary} />
+              </View>
+
+              <View style={{ width: 220, height: 110, marginTop: 20, alignItems: 'center', justifyContent: 'flex-end' }}>
+                <Svg width="100%" height="100%" viewBox="0 0 200 100">
+                  {/* مسار العداد الخلفي (الرمادي) */}
+                  <Path
+                    d="M 20 90 A 80 80 0 0 1 180 90"
+                    fill="none"
+                    stroke={COLORS.cardBorder}
+                    strokeWidth="12"
+                    strokeLinecap="round"
+                  />
+                  {/* مسار العداد الملون (التفاعلي) */}
+                  <Path
+                    d="M 20 90 A 80 80 0 0 1 180 90"
+                    fill="none"
+                    stroke={liveData.rpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(liveData.rpm).tone)}
+                    strokeWidth="12"
+                    strokeLinecap="round"
+                    strokeDasharray={251.2} // محيط النص دائرة (Pi * 80)
+                    strokeDashoffset={liveData.rpm === null ? 251.2 : 251.2 - (Math.min(liveData.rpm / 6000, 1) * 251.2)}
+                  />
+                </Svg>
+                
+                {/* الأرقام داخل العداد */}
+                <View style={{ position: 'absolute', bottom: 0, alignItems: 'center' }}>
+                  {isLiveDataLoading && liveData.rpm === null ? (
+                    <ActivityIndicator color={COLORS.accent} style={{ marginBottom: 10 }} />
+                  ) : (
+                    <>
+                      <Text style={{ color: COLORS.textPrimary, fontSize: 42, fontWeight: '900', letterSpacing: -1, height: 48 }}>
+                        {liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
+                      </Text>
+                      <Text style={{ color: COLORS.textSecondary, fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>RPM</Text>
+                    </>
+                  )}
+                </View>
+              </View>
+              <Text style={{ color: COLORS.textSecondary, fontSize: 14, fontWeight: '600', marginTop: 12 }}>
+                {isAr ? 'سرعة دوران المحرك' : 'Engine Speed'}
+              </Text>
+            </View>
+            {/* ── End of RPM Gauge ── */}
             {/* The other 6 cards (2x2x2) */}
             <LiveCard
               icon="thermometer-outline"
@@ -641,28 +679,7 @@ export default function DiagnosticsScreen() {
                     : 'Misfire data not supported or not implemented yet'}
                 </Text>
 
-                {/* ── زرار الاستطلاع المؤقت ── */}
-                <TouchableOpacity
-                  style={{ backgroundColor: COLORS.accent, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10, marginTop: 16 }}
-                  onPress={async () => {
-                    if (!isConnected()) {
-                      Alert.alert('Error', 'Connect to OBD first');
-                      return;
-                    }
-                    try {
-                      const res = await sendOBDCommand('06A2', 4000); // بنستنى 4 ثواني
-                      Alert.alert('نتيجة الاستطلاع 06A2', res || 'Empty response');
-                    } catch (e: any) {
-                      Alert.alert('خطأ في الاستطلاع', e?.message || 'Unknown Error');
-                    }
-                  }}
-                >
-                  <Text style={{ color: '#0B0D10', fontWeight: 'bold', fontSize: 14 }}>
-                    {isAr ? '🔍 فحص استطلاعي للسليندر 1' : '🔍 Probe Cylinder 1'}
-                  </Text>
-                </TouchableOpacity>
-
-              </View>
+                </View>
             )}
           </View>
         )}

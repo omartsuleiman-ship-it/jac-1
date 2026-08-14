@@ -560,9 +560,41 @@ export const getReadiness = async () => {
     o2sensor: o2Supported ? !o2NotReady : true,
   };
 };
-export const getMisfireCounters = async (): Promise<null> => {
-  // Mode $06 (TID/CID misfire counters) is not implemented for this dongle/protocol yet.
-  // Return null — never fabricated numbers — so the UI can honestly show "not supported / not implemented".
-  console.warn('[BLE] Mode 06 misfire data is not implemented; returning null.');
-  return null;
+export const getMisfireCounters = async (): Promise<{ cylinder: number; count: number }[] | null> => {
+  const counters: { cylinder: number; count: number }[] = [];
+  
+  // عناوين السليندرات في Mode 06
+  const cylinders = [
+    { id: 1, cmd: '06A2', header: '46A2' },
+    { id: 2, cmd: '06A3', header: '46A3' },
+    { id: 3, cmd: '06A4', header: '46A4' },
+    { id: 4, cmd: '06A5', header: '46A5' },
+  ];
+
+  for (const cyl of cylinders) {
+    try {
+      // بنبعت أمر السليندر ونستنى الرد
+      const res = await sendOBDCommand(cyl.cmd, 1500); 
+      
+      // بنمسح كل المسافات، والسطور الجديدة، وأرقام الفريمات زي (0: و 1: و 2:)
+      const cleanHex = res.replace(/[\s\r\n]+/g, '').replace(/[0-9a-fA-F]:/g, '').toUpperCase();
+      const idx = cleanHex.indexOf(cyl.header);
+
+      if (idx !== -1) {
+        // ترتيب البايتات: (46A2) = 4 حروف + (Test ID & Comp ID) = 4 حروف.
+        // إذن القيمة الفعلية بتبدأ بعد 8 حروف، وطولها 4 حروف (2 Bytes).
+        const valueHex = cleanHex.substring(idx + 8, idx + 12);
+        const count = parseInt(valueHex, 16);
+        counters.push({ cylinder: cyl.id, count: isNaN(count) ? 0 : count });
+      } else {
+        // لو مفيش بيانات للسليندر ده، بنحطه بصفر مؤقتاً
+        counters.push({ cylinder: cyl.id, count: 0 }); 
+      }
+    } catch (e) {
+      console.warn(`[BLE] Failed to fetch misfire for cyl ${cyl.id}`, e);
+      counters.push({ cylinder: cyl.id, count: 0 });
+    }
+  }
+  
+  return counters.length > 0 ? counters : null;
 };
