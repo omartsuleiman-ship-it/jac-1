@@ -159,7 +159,7 @@ export default function TripCostScreen() {
           tripOdometerDeltaRef.current += deltaKm;
           setDistanceKm((prev) => prev + deltaKm);
 
-          const deltaLiters = (mafGramsPerSec / 14.7 / 710) * secondsElapsed;
+          const deltaLiters = (mafGramsPerSec / 14.7 / 740) * secondsElapsed;
           setFuelConsumedLiters((prev) => prev + deltaLiters);
         }
         lastPollRef.current = now;
