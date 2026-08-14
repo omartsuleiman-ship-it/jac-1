@@ -427,20 +427,47 @@ export const getLiveData = async () => {
     }
   };
 
+  // 1. Fetch Basic Engine Data
   const rpm = await safeRequest('010C');
   const coolant = await safeRequest('0105');
-  const voltage = await safeRequest('0142');
-  const maf = await safeRequest('0110');
   const o2 = await safeRequest('0114');
   const fuelTrim = await safeRequest('0106');
 
+  // 2. Direct Battery Voltage via ELM327 ATRV command
+  let voltage = 0;
+  try {
+    const atrvResponse = await sendOBDCommand('ATRV');
+    // ATRV returns string like "14.1V"
+    const match = atrvResponse.match(/[\d.]+/);
+    if (match) voltage = parseFloat(match[0]);
+  } catch (e) {
+    console.warn('[BLE] ATRV failed', e);
+  }
+
+  // 3. Virtual MAF (Speed-Density) for JAC S3 1.5L
+  let maf = 0;
+  const map = await safeRequest('010B'); // MAP in kPa
+  const iat = await safeRequest('010F'); // IAT in °C
+
+  if (rpm !== null && map !== null && iat !== null && rpm > 0) {
+    const VE = 0.80; // Volumetric Efficiency (~80% average for 1.5L NA)
+    const ED = 1.499; // Engine Displacement in Liters (JAC S3)
+    const iatKelvin = iat + 273.15;
+    const gasConstant = 8.314; 
+    const airMolarMass = 28.97;
+    
+    // Speed-Density Formula to calculate MAF (g/s)
+    const imap = (rpm * map) / 120;
+    maf = imap * VE * ED * (airMolarMass / (gasConstant * iatKelvin));
+  }
+
   return {
-    rpm,
-    coolant,
-    voltage,
-    maf,
-    o2,
-    fuelTrim,
+    rpm: rpm ?? 0,
+    coolant: coolant ?? 0,
+    voltage: parseFloat(voltage.toFixed(1)),
+    maf: parseFloat(maf.toFixed(2)),
+    o2: o2 ?? 0,
+    fuelTrim: fuelTrim ?? 0,
   };
 };
 
@@ -458,6 +485,12 @@ const requestPID = async (pid: string): Promise<number> => {
   const numbers = bytes.map(b => parseInt(b, 16));
 
   switch (pid) {
+    case '010B': // MAP (Manifold Absolute Pressure) - kPa
+      if (numbers.length < 1) return 0;
+      return numbers[0];
+    case '010F': // IAT (Intake Air Temperature) - °C
+      if (numbers.length < 1) return 0;
+      return numbers[0] - 40;
     case '010C':
       if (numbers.length < 2) return 0;
       return ((numbers[0] * 256) + numbers[1]) / 4;

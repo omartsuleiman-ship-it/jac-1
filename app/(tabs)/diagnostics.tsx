@@ -14,7 +14,7 @@ import {
   View,
 } from 'react-native';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
+import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected, sendOBDCommand } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -57,44 +57,43 @@ type CardStatus = { tone: 'success' | 'warning' | 'danger'; statusEn: string; st
 
 const getVoltageStatus = (v: number | null): CardStatus => {
   if (v === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (v < 12.2 || v > 15.5) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (v < 13.5 || v > 14.9) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (v < 11.5 || v > 15.0) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (v >= 11.5 && v < 13.3) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
 const getCoolantStatus = (c: number | null): CardStatus => {
   if (c === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (c > 115 || c < 70) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (c > 105 || c < 85) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (c > 115) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (c >= 106 && c <= 115) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  // From 0 to 105 is normal (covers cold start and normal operating temp)
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
 const getRpmStatus = (rpm: number | null): CardStatus => {
   if (rpm === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (rpm < 500 || rpm > 1300) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (rpm < 650 || rpm > 950) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (rpm > 6000) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (rpm > 4000 && rpm <= 6000) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
 const getMafStatus = (maf: number | null): CardStatus => {
   if (maf === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (maf < 1.0 || maf > 7.0) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (maf < 1.8 || maf > 5.0) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (maf === 0) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
 const getO2Status = (o2: number | null): CardStatus => {
   if (o2 === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (o2 <= 0.05 || o2 >= 0.95) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (o2 < 0.15 || o2 > 0.85) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (o2 <= 0.05 || o2 >= 0.95) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
 const getFuelTrimStatus = (ft: number | null): CardStatus => {
   if (ft === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
   const abs = Math.abs(ft);
-  if (abs > 15) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (abs > 8) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  if (abs > 10) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (abs > 5 && abs <= 10) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
@@ -228,15 +227,15 @@ export default function DiagnosticsScreen() {
   // ---------------------------------------------------------------------------
   // Live Data (Mode 01 PIDs)
   // ---------------------------------------------------------------------------
-  const fetchLiveData = useCallback(async () => {
-    setIsLiveDataLoading(true);
+  const fetchLiveData = useCallback(async (isInitial = false) => {
+    if (isInitial) setIsLiveDataLoading(true);
     try {
       const data = await getLiveData();
       setLiveData(data);
     } catch (error) {
       console.warn('Failed to fetch live data:', error);
     } finally {
-      setIsLiveDataLoading(false);
+      if (isInitial) setIsLiveDataLoading(false);
     }
   }, []);
 
@@ -244,8 +243,8 @@ export default function DiagnosticsScreen() {
   useEffect(() => {
     let interval: NodeJS.Timeout | null = null;
     if (activeView === 'LIVE_DATA') {
-      fetchLiveData();
-      interval = setInterval(fetchLiveData, 1000);
+      fetchLiveData(true); // Load only on the very first fetch
+      interval = setInterval(() => fetchLiveData(false), 1000); // Silent updates thereafter
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -624,6 +623,28 @@ export default function DiagnosticsScreen() {
                     ? 'بيانات التفتيش غير مدعومة أو غير مطبقة بعد'
                     : 'Misfire data not supported or not implemented yet'}
                 </Text>
+
+                {/* ── زرار الاستطلاع المؤقت ── */}
+                <TouchableOpacity
+                  style={{ backgroundColor: COLORS.accent, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10, marginTop: 16 }}
+                  onPress={async () => {
+                    if (!isConnected()) {
+                      Alert.alert('Error', 'Connect to OBD first');
+                      return;
+                    }
+                    try {
+                      const res = await sendOBDCommand('06A2', 4000); // بنستنى 4 ثواني
+                      Alert.alert('نتيجة الاستطلاع 06A2', res || 'Empty response');
+                    } catch (e: any) {
+                      Alert.alert('خطأ في الاستطلاع', e?.message || 'Unknown Error');
+                    }
+                  }}
+                >
+                  <Text style={{ color: '#0B0D10', fontWeight: 'bold', fontSize: 14 }}>
+                    {isAr ? '🔍 فحص استطلاعي للسليندر 1' : '🔍 Probe Cylinder 1'}
+                  </Text>
+                </TouchableOpacity>
+
               </View>
             )}
           </View>

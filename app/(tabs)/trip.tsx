@@ -142,13 +142,50 @@ export default function TripCostScreen() {
       lastPollRef.current = null;
       return;
     }
+
+    // دالة مساعدة لترجمة الأرقام بسرعة جوه الـ Loop
+    const parseHexBytes = (hexStr: string, header: string) => {
+      const clean = hexStr.replace(/\s/g, '').toUpperCase();
+      const idx = clean.indexOf(header);
+      if (idx === -1) return [];
+      const match = clean.substring(idx + header.length).match(/.{1,2}/g) || [];
+      return match.map(b => parseInt(b, 16));
+    };
+
     const poll = setInterval(async () => {
       if (!isConnected()) return;
       try {
+        // 1. قراءة السرعة لتجميع الكيلومترات
         const speedResponse = await sendOBDCommand('010D');
-        const mafResponse = await sendOBDCommand('0110');
         const speedKmh = parseSpeedKmh(speedResponse);
-        const mafGramsPerSec = parseMafGramsPerSec(mafResponse);
+        
+        // 2. قراءة تدفق الهواء
+        let mafGramsPerSec = 0;
+        const mafResponse = await sendOBDCommand('0110');
+        mafGramsPerSec = parseMafGramsPerSec(mafResponse);
+
+        // 3. الخطة البديلة (حساس الهواء الوهمي) لو العربية MAP زي الـ JAC S3
+        if (mafGramsPerSec === 0) {
+           const rpmRes = await sendOBDCommand('010C');
+           const mapRes = await sendOBDCommand('010B');
+           const iatRes = await sendOBDCommand('010F');
+
+           const rpmData = parseHexBytes(rpmRes, '410C');
+           const mapData = parseHexBytes(mapRes, '410B');
+           const iatData = parseHexBytes(iatRes, '410F');
+
+           const rpm = rpmData.length >= 2 ? ((rpmData[0] * 256) + rpmData[1]) / 4 : 0;
+           const map = mapData.length >= 1 ? mapData[0] : 0;
+           const iat = iatData.length >= 1 ? iatData[0] - 40 : 40; // لو مفيش قراية بنفترض الحرارة 40
+
+           if (rpm > 0 && map > 0) {
+              const iatKelvin = iat + 273.15;
+              const imap = (rpm * map) / 120;
+              // معادلة الكثافة: كفاءة 80%، سعة 1.5 لتر، كثافة الهواء 28.97
+              mafGramsPerSec = imap * 0.80 * 1.499 * (28.97 / (8.314 * iatKelvin));
+           }
+        }
+
         const now = Date.now();
 
         if (lastPollRef.current) {
@@ -159,6 +196,7 @@ export default function TripCostScreen() {
           tripOdometerDeltaRef.current += deltaKm;
           setDistanceKm((prev) => prev + deltaKm);
 
+          // الحسبة الدقيقة للبنزين (كثافة البنزين 740 بدل 710)
           const deltaLiters = (mafGramsPerSec / 14.7 / 740) * secondsElapsed;
           setFuelConsumedLiters((prev) => prev + deltaLiters);
         }
@@ -166,7 +204,7 @@ export default function TripCostScreen() {
       } catch (error) {
         console.warn('OBD trip poll failed:', error);
       }
-    }, 2000);
+    }, 2500); // زودنا الوقت شوية عشان البلوتوث يلحق يرد على كل الأوامر دي وميعلقش
     return () => clearInterval(poll);
   }, [tripActive]);
 
