@@ -97,6 +97,12 @@ const getFuelTrimStatus = (ft: number | null): CardStatus => {
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
+const getEngineLoadStatus = (load: number | null): CardStatus => {
+  if (load === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (load > 85) return { tone: 'warning', statusEn: 'High', statusAr: 'مرتفع' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
 type ViewMode = 'SCANNER' | 'LIVE_DATA' | 'READINESS';
 
 type FaultStatus = 'ready' | 'loading' | 'error';
@@ -136,6 +142,7 @@ export default function DiagnosticsScreen() {
     rpm: number | null;
     coolant: number | null;
     voltage: number | null;
+    engineLoad: number | null;
     maf: number | null;
     o2: number | null;
     fuelTrim: number | null;
@@ -143,6 +150,7 @@ export default function DiagnosticsScreen() {
     rpm: null,
     coolant: null,
     voltage: null,
+    engineLoad: null,
     maf: null,
     o2: null,
     fuelTrim: null,
@@ -408,20 +416,23 @@ export default function DiagnosticsScreen() {
 
         {activeView === 'LIVE_DATA' && (
           <View style={styles.liveGrid}>
+            {/* RPM Card - Big/Full Width at the top */}
             <LiveCard
-              icon="battery-charging-outline"
-              tone={getVoltageStatus(liveData.voltage).tone}
-              value={liveData.voltage !== null ? liveData.voltage.toFixed(1) : '--'}
-              unit="V"
-              labelEn="Battery Voltage"
-              labelAr="جهد البطارية"
-              statusEn={getVoltageStatus(liveData.voltage).statusEn}
-              statusAr={getVoltageStatus(liveData.voltage).statusAr}
+              fullWidth
+              icon="speedometer-outline"
+              tone={getRpmStatus(liveData.rpm).tone}
+              value={liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
+              unit="RPM"
+              labelEn="Engine Speed"
+              labelAr="سرعة المحرك"
+              statusEn={getRpmStatus(liveData.rpm).statusEn}
+              statusAr={getRpmStatus(liveData.rpm).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.voltage === null}
+              isWaiting={liveData.rpm === null}
             />
+            {/* The other 6 cards (2x2x2) */}
             <LiveCard
               icon="thermometer-outline"
               tone={getCoolantStatus(liveData.coolant).tone}
@@ -437,18 +448,32 @@ export default function DiagnosticsScreen() {
               isWaiting={liveData.coolant === null}
             />
             <LiveCard
-              icon="speedometer-outline"
-              tone={getRpmStatus(liveData.rpm).tone}
-              value={liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
-              unit="RPM"
-              labelEn="Engine Speed"
-              labelAr="سرعة المحرك"
-              statusEn={getRpmStatus(liveData.rpm).statusEn}
-              statusAr={getRpmStatus(liveData.rpm).statusAr}
+              icon="battery-charging-outline"
+              tone={getVoltageStatus(liveData.voltage).tone}
+              value={liveData.voltage !== null ? liveData.voltage.toFixed(1) : '--'}
+              unit="V"
+              labelEn="Battery Voltage"
+              labelAr="جهد البطارية"
+              statusEn={getVoltageStatus(liveData.voltage).statusEn}
+              statusAr={getVoltageStatus(liveData.voltage).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.rpm === null}
+              isWaiting={liveData.voltage === null}
+            />
+            <LiveCard
+              icon="speedometer"
+              tone={getEngineLoadStatus(liveData.engineLoad).tone}
+              value={liveData.engineLoad !== null ? liveData.engineLoad.toFixed(1) : '--'}
+              unit="%"
+              labelEn="Engine Load"
+              labelAr="حمل المحرك"
+              statusEn={getEngineLoadStatus(liveData.engineLoad).statusEn}
+              statusAr={getEngineLoadStatus(liveData.engineLoad).statusAr}
+              isAr={isAr}
+              dir={dir}
+              isLoading={isLiveDataLoading}
+              isWaiting={liveData.engineLoad === null}
             />
             <LiveCard
               icon="flash-outline"
@@ -481,18 +506,10 @@ export default function DiagnosticsScreen() {
                 openSensorAdvice(
                   'O2 Sensor — Checking',
                   'حساس الأكسجين — قيد الفحص',
-                  'No need to stop; drive normally while the module finishes evaluating the sensor over the next few minutes of driving.',
-                  'مفيش داعي تقف؛ كمل السواقة عادي لحد ما الكمبيوتر يخلص تقييم الحساس خلال كذا دقيقة سواقة.',
-                  [
-                    'If the reading stays flat near 0.65V for more than a full drive cycle, have the O2 sensor tested.',
-                    'Check the sensor connector for corrosion or a loose pin.',
-                    'Inspect for an exhaust leak upstream of the sensor.',
-                  ],
-                  [
-                    'لو القراءة فضلت ثابتة حوالين 0.65V لأكتر من دورة تشغيل كاملة، اطلب فحص الحساس.',
-                    'افحص وصلة الحساس من الصدأ أو الفك.',
-                    'افحص أي تسريب في العادم قبل الحساس.',
-                  ]
+                  'No need to stop; drive normally while the module finishes evaluating the sensor.',
+                  'مفيش داعي تقف؛ كمل السواقة عادي لحد ما الكمبيوتر يخلص تقييم الحساس.',
+                  ['Check sensor connector.', 'Inspect for exhaust leak.'],
+                  ['افحص وصلة الحساس.', 'افحص أي تسريب في العادم.']
                 )
               }
             />
@@ -820,6 +837,7 @@ function LiveCard({
   onPress,
   isLoading = false,
   isWaiting = false,
+  fullWidth = false,
 }: {
   icon: any;
   tone: 'success' | 'warning' | 'danger' | 'accent';
@@ -834,6 +852,7 @@ function LiveCard({
   onPress?: () => void;
   isLoading?: boolean;
   isWaiting?: boolean;
+  fullWidth?: boolean;
 }) {
   // Determine the actual tone to display (waiting overrides to neutral)
   const displayTone = isWaiting ? 'warning' : tone;
@@ -886,14 +905,16 @@ function LiveCard({
     </>
   );
 
+  const cardStyle: any = [styles.liveCard, fullWidth ? { width: '100%', paddingVertical: 20 } : null];
+  
   if (onPress && !isLoading && !isWaiting) {
     return (
-      <TouchableOpacity style={[styles.liveCard, styles.liveCardTappable]} onPress={onPress} activeOpacity={0.8}>
+      <TouchableOpacity style={[cardStyle, styles.liveCardTappable]} onPress={onPress} activeOpacity={0.8}>
         {CardInner}
       </TouchableOpacity>
     );
   }
-  return <View style={styles.liveCard}>{CardInner}</View>;
+  return <View style={cardStyle}>{CardInner}</View>;
 }
 
 function AdviceModal({
