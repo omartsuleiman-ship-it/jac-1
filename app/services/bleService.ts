@@ -432,6 +432,7 @@ export const getLiveData = async () => {
   const coolant = await safeRequest('0105');
   const o2 = await safeRequest('0114');
   const fuelTrim = await safeRequest('0106');
+  const engineLoad = await safeRequest('0104');
 
   // 2. Direct Battery Voltage via ELM327 ATRV command
   let voltage = 0;
@@ -465,6 +466,7 @@ export const getLiveData = async () => {
     rpm: rpm ?? 0,
     coolant: coolant ?? 0,
     voltage: parseFloat(voltage.toFixed(1)),
+    engineLoad: engineLoad ?? 0,
     maf: parseFloat(maf.toFixed(2)),
     o2: o2 ?? 0,
     fuelTrim: fuelTrim ?? 0,
@@ -491,6 +493,9 @@ const requestPID = async (pid: string): Promise<number> => {
     case '010F': // IAT (Intake Air Temperature) - °C
       if (numbers.length < 1) return 0;
       return numbers[0] - 40;
+    case '0104': // Engine Load (%)
+      if (numbers.length < 1) return 0;
+      return (numbers[0] * 100) / 255;
     case '010C':
       if (numbers.length < 2) return 0;
       return ((numbers[0] * 256) + numbers[1]) / 4;
