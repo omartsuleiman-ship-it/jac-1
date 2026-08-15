@@ -217,9 +217,9 @@ export default function DiagnosticsScreen() {
   // ---------------------------------------------------------------------------
   // DTC Scan (Mode 03)
   // ---------------------------------------------------------------------------
-  const resolveFaultCode = async (code: string, scanId: number) => {
+  const resolveFaultCode = async (code: string, moduleName: string | undefined, scanId: number) => {
     try {
-      const ai = await fetchDTCFromAI(code);
+      const ai = await fetchDTCFromAI(code, moduleName);
       if (scanIdRef.current !== scanId) return;
       setFaults((prev) =>
         prev?.map((f) => (f.code === code ? { ...ai, source: 'AI', status: 'ready' } : f)) ?? prev
@@ -237,19 +237,19 @@ export default function DiagnosticsScreen() {
     setFaults(null);
 
     try {
-      const codes = await getDTCs();
+      const foundItems = await getDTCs();
       if (scanIdRef.current !== thisScan) return;
 
-      const initialFaults: FaultItem[] = codes.map((code) => {
-        const local = DTC_DATABASE[code];
+      const initialFaults: FaultItem[] = foundItems.map((item) => {
+        const local = DTC_DATABASE[item.code];
         if (local) {
-          return { ...local, source: 'LOCAL', status: 'ready' };
+          return { ...local, module: local.module || item.module, source: 'LOCAL', status: 'ready' };
         }
-        return { code, source: 'AI', status: 'loading' };
+        return { code: item.code, module: item.module, source: 'AI', status: 'loading' };
       });
 
       setFaults(initialFaults);
-      initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, thisScan));
+      initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, f.module, thisScan));
     } catch (error) {
       console.error('Scan failed:', error);
       Alert.alert('Error', isAr ? 'فشل الفحص' : 'Scan failed');
@@ -488,7 +488,7 @@ export default function DiagnosticsScreen() {
                 onPress={() => openFaultAdvice(f)}
                 onRetry={() => {
                   setFaults((prev) => prev?.map((x) => (x.code === f.code ? { ...x, status: 'loading' } : x)) ?? prev);
-                  resolveFaultCode(f.code, scanIdRef.current);
+                  resolveFaultCode(f.code, f.module, scanIdRef.current);
                 }}
               />
             ))}

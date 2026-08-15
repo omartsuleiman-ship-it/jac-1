@@ -92,8 +92,9 @@ is minor, classify it as at least CAUTION, and use STOP only for faults that pos
 risk of stranding the driver, engine damage, or an accident (e.g. brake, steering,
 overheating, major loss of power, airbag-related codes).`;
 
-function buildPrompt(code: string): string {
-  return `The local app dictionary does not have an entry for DTC code "${code}". Generate an
+function buildPrompt(code: string, moduleName?: string): string {
+  const modText = moduleName ? `reported specifically by the ${moduleName} module` : 'reported by the vehicle';
+  return `The local app dictionary does not have an entry for DTC code "${code}" (${modText}). Generate an
 accurate, safety-conscious explanation for this exact code, following the JSON shape
 described in the system prompt.`;
 }
@@ -102,16 +103,7 @@ export interface AIResolvedDTC extends DTCRecord {
   source: 'AI';
 }
 
-/**
- * Calls Groq to resolve a DTC code that was not found in the local
- * dictionary. Always requests BOTH languages in one call so the UI can
- * toggle isAr without re-fetching.
- *
- * Throws on network failure, timeout, missing API key, or a malformed AI
- * response — callers (see resolveFaultCode in diagnostics.tsx) are expected
- * to catch this and show a retry state on the fault card.
- */
-export async function fetchDTCFromAI(code: string): Promise<AIResolvedDTC> {
+export async function fetchDTCFromAI(code: string, moduleName?: string): Promise<AIResolvedDTC> {
   if (!GROQ_API_KEY) {
     throw new Error('Missing EXPO_PUBLIC_GROQ_API_KEY — set it in your .env file.');
   }
@@ -184,7 +176,7 @@ export async function fetchDTCFromAI(code: string): Promise<AIResolvedDTC> {
     code,
     descEn: parsed.descEn,
     descAr: parsed.descAr,
-    module: parsed.module ?? undefined,
+    module: moduleName || parsed.module, // Use our detected module name, fallback to AI's guess
     urgency,
     adviceEn: parsed.adviceEn,
     adviceAr: parsed.adviceAr,
