@@ -284,36 +284,67 @@ export default function DiagnosticsScreen() {
     }
   }, []);
 
-  // Poll live data with Dual-Timers
+  // Poll live data with a single sequential loop instead of two independent
+  // setIntervals. This guarantees the slow (multi-ECU header-switching) request
+  // always runs to completion before the fast loop is allowed to send its next
+  // command — so ELM327 commands from the two cadences can never overlap or
+  // pile up in the queue, and the JS thread/ELM buffer can't get stuck.
   useEffect(() => {
-    let intervalFast: ReturnType<typeof setInterval> | null = null;
-    let intervalSlow: ReturnType<typeof setInterval> | null = null;
-    
+    let cancelled = false;
+    let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+    const FAST_INTERVAL_MS = 800;
+    const SLOW_INTERVAL_MS = 5000;
+
+    const runPollLoop = async () => {
+      if (cancelled) return;
+      await fetchLiveDataWrapper(true);
+      if (cancelled) return;
+      await fetchExtraSafetyWrapper();
+      let lastSlowFetch = Date.now();
+
+      const tick = async () => {
+        if (cancelled) return;
+        const tickStart = Date.now();
+
+        // Slow multi-ECU request takes priority: it fully completes (halting
+        // the fast loop) before any further fast-loop command is sent.
+        if (tickStart - lastSlowFetch >= SLOW_INTERVAL_MS) {
+          await fetchExtraSafetyWrapper();
+          lastSlowFetch = Date.now();
+          if (cancelled) return;
+        }
+
+        await fetchLiveDataWrapper(false);
+        if (cancelled) return;
+
+        const elapsed = Date.now() - tickStart;
+        const delay = Math.max(0, FAST_INTERVAL_MS - elapsed);
+        pollTimeout = setTimeout(tick, delay);
+      };
+
+      pollTimeout = setTimeout(tick, FAST_INTERVAL_MS);
+    };
+
     if (activeView === 'LIVE_DATA') {
-      fetchLiveDataWrapper(true); 
-      fetchExtraSafetyWrapper();
-      
-      intervalFast = setInterval(() => fetchLiveDataWrapper(false), 800); // Fast for Engine RPM
-      intervalSlow = setInterval(() => fetchExtraSafetyWrapper(), 5000); // Slow for Multi-ECU Safety (Trans, ABS, Tires)
+      runPollLoop();
     }
-    
+
     return () => {
-      if (intervalFast) clearInterval(intervalFast);
-      if (intervalSlow) clearInterval(intervalSlow);
+      cancelled = true;
+      if (pollTimeout) clearTimeout(pollTimeout);
     };
   }, [activeView, fetchLiveDataWrapper, fetchExtraSafetyWrapper]);
 
-  // Smooth Animation Trigger
+  // Smooth Animation Trigger — animate toward 0 on a null/lost reading too
+  // (instead of an instant setValue snap), so one missed poll doesn't jolt
+  // the gauge; the numeric readout still switches to '--' immediately.
   useEffect(() => {
-    if (connected && liveData.rpm !== null) {
-      Animated.timing(rpmAnim, {
-        toValue: liveData.rpm,
-        duration: 750,
-        useNativeDriver: false,
-      }).start();
-    } else {
-      rpmAnim.setValue(0);
-    }
+    const target = connected && liveData.rpm !== null ? liveData.rpm : 0;
+    Animated.timing(rpmAnim, {
+      toValue: target,
+      duration: 750,
+      useNativeDriver: false,
+    }).start();
   }, [liveData.rpm, connected]);
 
   // ---------------------------------------------------------------------------

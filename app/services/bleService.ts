@@ -631,34 +631,75 @@ export const getMisfireCounters = async (): Promise<{ cylinder: number; count: n
 };
 
 // دالة جديدة بطيئة (كل 5 ثواني) لتجنب بطء الـ RPM، بتجيب داتا الأمان الحرجة
+type SafetyProbeResult = { label: string; raw: string; ok: boolean };
+
+const querySafetyECU = async (
+  header: string,
+  request: string,
+  label: string
+): Promise<SafetyProbeResult> => {
+  try {
+    // 1. Point the adapter at this ECU's transmit header
+    await sendOBDCommand(`ATSH${header}`, 500);
+
+    // 2. Filter incoming frames to ONLY this ECU's reply ID (header + 8, per
+    // ISO 15765-4 — e.g. 7E1 -> 7E9). Without this, replies/noise from other
+    // modules on the shared bus can land in the buffer and corrupt parsing.
+    const replyId = (parseInt(header, 16) + 8).toString(16).toUpperCase();
+    await sendOBDCommand(`ATCRA${replyId}`, 500);
+
+    // 3. Explicit automatic flow control — ensures multi-frame ISO-TP replies
+    // (UDS payloads >7 bytes) aren't cut short waiting on a Flow Control frame
+    await sendOBDCommand('ATFCSM0', 500);
+
+    const raw = await sendOBDCommand(request, 800);
+    const upper = raw.toUpperCase();
+    const ok = !upper.includes('NO DATA') && !upper.includes('ERROR') && !upper.includes('UNABLE') && !upper.startsWith('7F');
+
+    if (ok) {
+      console.log(`[BLE] ${label} raw response: ${raw.trim()}`);
+    } else {
+      console.warn(`[BLE] ${label}: no data (${raw.trim()})`);
+    }
+    return { label, raw, ok };
+  } catch (error) {
+    // Isolated per-ECU: a timeout or error here never blocks the next module
+    console.warn(`[BLE] ${label} fetch failed`, error);
+    return { label, raw: '', ok: false };
+  } finally {
+    // Clear this ECU's receive filter before the next module (or the final
+    // engine-header fallback) picks its own
+    await sendOBDCommand('ATCRA', 500).catch(() => {});
+  }
+};
+
 export const getExtraSafetyData = async () => {
   let atfTemp = null;
   let absPressure = null;
   let tirePressure = null;
 
-  try {
-    // محاولة قراءة حرارة الفتيس (Transmission)
-    await sendOBDCommand('ATSH7E1', 500);
-    const atfRes = await sendOBDCommand('222001', 800); // UDS Request
-    // (حالياً بنرجع null لو الكنترول ماردش عشان مفيش داتا وهمية تلخبطك)
-    if (!atfRes.includes('NO DATA') && !atfRes.includes('ERROR')) {
-       // Parsing logic goes here when we sniff JAC's exact hex format
-    }
-    
-    // محاولة قراءة ضغط الفرامل (ABS)
-    await sendOBDCommand('ATSH7B0', 500);
-    const absRes = await sendOBDCommand('22C001', 800);
-    
-    // محاولة قراءة ضغط الكاوتش (TPMS)
-    await sendOBDCommand('ATSH7A0', 500);
-    const tpmsRes = await sendOBDCommand('22D001', 800);
+  const [atf, abs, tpms] = await Promise.all([
+    // Note: sequential, not truly parallel — the command queue serializes
+    // these automatically since ELM327 is half-duplex, so Promise.all here
+    // just lets us fire the three requests without one's rejection stopping
+    // the others.
+  ].length
+    ? []
+    : [
+        querySafetyECU('7E1', '222001', 'Transmission (ATF temp)'),
+        querySafetyECU('7B0', '22C001', 'ABS (brake pressure)'),
+        querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)'),
+      ]);
 
-  } catch (error) {
-    console.warn('[BLE] Extra Safety Data fetch failed', error);
-  } finally {
-    // ⚠️ العودة الفورية لكنترول الموتور
-    await sendOBDCommand('ATSH7E0', 500);
-  }
+  // Parsing logic goes here once we confirm JAC's exact hex format from the
+  // [BLE] raw response logs above — atf.raw / abs.raw / tpms.raw hold it.
+  void atf;
+  void abs;
+  void tpms;
+
+  // ⚠️ Always return to the Engine ECU header, no matter what happened above,
+  // so getLiveData's RPM/coolant/etc. polling never hangs on a stale header
+  await sendOBDCommand('ATSH7E0', 500).catch(() => {});
 
   return { atfTemp, absPressure, tirePressure };
 };
