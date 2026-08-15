@@ -1,12 +1,12 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Tabs } from 'expo-router';
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { StyleSheet, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Tabs } from 'expo-router';
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 
 // ── 1. Global Language Context ──
-type LangContextType = { lang: 'en' | 'ar'; toggleLang: () => void; isAr: boolean };
-const LangContext = createContext<LangContextType>({ lang: 'ar', toggleLang: () => {}, isAr: true });
+type LangContextType = { lang: 'en' | 'ar'; toggleLanguage: () => void; isAr: boolean };
+const LangContext = createContext<LangContextType>({ lang: 'ar', toggleLanguage: () => {}, isAr: true });
 export const useLang = () => useContext(LangContext);
 
 const COLORS = {
@@ -37,7 +37,7 @@ export default function TabLayout() {
     loadLanguage();
   }, []);
 
-  const toggleLang = async () => {
+  const toggleLanguage = async () => {
     const newLang = lang === 'en' ? 'ar' : 'en';
     setLang(newLang);
     try {
@@ -50,7 +50,7 @@ export default function TabLayout() {
   const isAr = lang === 'ar';
 
   return (
-    <LangContext.Provider value={{ lang, toggleLang, isAr }}>
+    <LangContext.Provider value={{ lang, toggleLanguage, isAr }}>
       <Tabs
         screenOptions={{
           headerStyle: { backgroundColor: COLORS.tabBarBg },
