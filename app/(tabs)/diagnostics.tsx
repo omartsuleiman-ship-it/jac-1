@@ -1,5 +1,6 @@
 // diagnostics.tsx
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { Audio } from 'expo-av';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -12,6 +13,7 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  Vibration,
   View,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
@@ -133,8 +135,32 @@ export default function DiagnosticsScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
 
-  // --- Animation State for RPM ---
+ // --- Animation State for RPM ---
   const rpmAnim = useRef(new Animated.Value(0)).current;
+
+  // --- Danger Alarm State ---
+  const [dangerSound, setDangerSound] = useState<Audio.Sound | null>(null);
+  const hasDangerRef = useRef(false);
+
+  // Load Danger Sound on Mount
+  useEffect(() => {
+    async function loadSound() {
+      try {
+        // استخدام رابط صوت إنذار مباشر عشان منضطرش نحمل ملفات محلية
+        const { sound } = await Audio.Sound.createAsync(
+          { uri: 'https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg' }
+        );
+        await sound.setIsLoopingAsync(true); // يفضل يرن لحد ما المشكلة تختفي
+        setDangerSound(sound);
+      } catch (error) {
+        console.warn("Couldn't load alarm sound", error);
+      }
+    }
+    loadSound();
+    return () => {
+      dangerSound?.unloadAsync();
+    };
+  }, []);
 
   // Tab state
   const [activeView, setActiveView] = useState<ViewMode>('SCANNER');
@@ -353,6 +379,41 @@ export default function DiagnosticsScreen() {
   const actualMaf = connected ? liveData.maf : null;
   const actualO2 = connected ? liveData.o2 : null;
   const actualFuelTrim = connected ? liveData.fuelTrim : null;
+
+  // --- Watchdog: Monitor for Danger ---
+  useEffect(() => {
+    // نتأكد إننا في شاشة اللايف داتا وإن في اتصال
+    if (activeView === 'LIVE_DATA' && connected) {
+      const isDanger =
+        getVoltageStatus(actualVoltage).tone === 'danger' ||
+        getCoolantStatus(actualCoolant).tone === 'danger' ||
+        getRpmStatus(actualRpm).tone === 'danger' ||
+        getFuelTrimStatus(actualFuelTrim).tone === 'danger';
+
+      if (isDanger && !hasDangerRef.current) {
+        hasDangerRef.current = true;
+        Vibration.vibrate([0, 500, 200, 500], true); // هزاز متكرر
+        dangerSound?.playAsync();
+        
+        Alert.alert(
+          isAr ? '🚨 تحذير خطر! 🚨' : '🚨 DANGER ALERT! 🚨',
+          isAr ? 'إحدى القراءات الحيوية للمحرك وصلت لمستوى الخطر، يرجى فحص السيارة فوراً وتأمين وقوفك!' 
+               : 'A critical live data parameter has reached a dangerous level. Please pull over safely!',
+          [{ text: isAr ? 'فهمت' : 'Understood', style: 'cancel' }]
+        );
+      } else if (!isDanger && hasDangerRef.current) {
+        // لو الخطر راح، اطفي السرينة والهزاز
+        hasDangerRef.current = false;
+        Vibration.cancel();
+        dangerSound?.stopAsync();
+      }
+    } else {
+      // لو قفلنا البلوتوث أو سيبنا الشاشة
+      hasDangerRef.current = false;
+      Vibration.cancel();
+      dangerSound?.stopAsync();
+    }
+  }, [actualVoltage, actualCoolant, actualRpm, actualFuelTrim, activeView, connected, dangerSound]);
 
   // ---------------------------------------------------------------------------
   // Render
