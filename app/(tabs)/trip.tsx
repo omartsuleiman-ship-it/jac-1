@@ -374,6 +374,26 @@ export default function TripCostScreen() {
   const passengersNum = Math.max(parseInt(passengers, 10) || 1, 1);
   const costPerPerson = totalCost / passengersNum;
 
+ // ── Delete Trip Handler ──
+  const handleDeleteTrip = (id: string) => {
+    Alert.alert(
+      isAr ? 'مسح الرحلة' : 'Delete Trip',
+      isAr ? 'هل أنت متأكد من مسح هذه الرحلة من السجل؟' : 'Are you sure you want to delete this trip?',
+      [
+        { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+        {
+          text: isAr ? 'مسح' : 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            const updated = recentTrips.filter(t => t.id !== id);
+            setRecentTrips(updated);
+            AsyncStorage.setItem('@recent_trips', JSON.stringify(updated)).catch(() => {});
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -538,19 +558,24 @@ export default function TripCostScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* ── RECENT TRIPS HISTORY ── */}
+         {/* ── RECENT TRIPS HISTORY ── */}
           {recentTrips.length > 0 && (
             <View style={[styles.card, { marginTop: 16 }]}>
               <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
-                {isAr ? 'آخر 5 رحلات' : 'Last 5 Trips'}
+                {isAr ? 'سجل الرحلات (آخر 10)' : 'Trip History (Last 10)'}
               </Text>
               {recentTrips.map((trip) => (
                 <View key={trip.id} style={{ borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder, paddingVertical: 12 }}>
-                  <View style={{ flexDirection: dir, justifyContent: 'space-between', marginBottom: 4 }}>
-                    <Text style={{ color: COLORS.textPrimary, fontSize: 14, fontWeight: '700' }}>
-                      {trip.from} <Ionicons name="arrow-forward" size={12} color={COLORS.textSecondary} /> {trip.to}
+                  <View style={{ flexDirection: dir, justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
+                    <Text style={{ color: COLORS.textPrimary, fontSize: 14, fontWeight: '700', flex: 1, textAlign: isAr ? 'right' : 'left' }}>
+                      {trip.from} <Ionicons name={isAr ? "arrow-back" : "arrow-forward"} size={12} color={COLORS.textSecondary} /> {trip.to}
                     </Text>
-                    <Text style={{ color: COLORS.accent, fontSize: 15, fontWeight: '800' }}>{trip.cost} {isAr ? 'ج' : 'EGP'}</Text>
+                    <View style={{ flexDirection: dir, alignItems: 'center', gap: 12 }}>
+                      <Text style={{ color: COLORS.accent, fontSize: 15, fontWeight: '800' }}>{trip.cost} {isAr ? 'ج' : 'EGP'}</Text>
+                      <TouchableOpacity onPress={() => handleDeleteTrip(trip.id)} hitSlop={10}>
+                        <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                      </TouchableOpacity>
+                    </View>
                   </View>
                   <Text style={{ color: COLORS.textSecondary, fontSize: 11, textAlign: isAr ? 'right' : 'left' }}>{trip.date}</Text>
                 </View>
@@ -564,7 +589,10 @@ export default function TripCostScreen() {
       {/* ── END TRIP MODAL ── */}
       <Modal visible={endModalVisible} animationType="slide" transparent={true}>
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-          <View style={styles.modalOverlay}>
+          <KeyboardAvoidingView 
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
+            style={styles.modalOverlay}
+          >
             <TouchableWithoutFeedback onPress={() => {}}>
               <View style={styles.modalContent}>
                 <View style={styles.modalHandle} />
@@ -616,7 +644,7 @@ export default function TripCostScreen() {
                   to: toText || (isAr ? 'غير محدد' : 'Blank'),
                   cost: totalCost.toFixed(2)
                 };
-                const updated = [newTrip, ...recentTrips].slice(0, 5);
+                const updated = [newTrip, ...recentTrips].slice(0, 10);
                 setRecentTrips(updated);
                 AsyncStorage.setItem('@recent_trips', JSON.stringify(updated)).catch(()=>{});
               }}>
@@ -640,7 +668,7 @@ export default function TripCostScreen() {
 
               </View>
             </TouchableWithoutFeedback>
-          </View>
+          </KeyboardAvoidingView>
         </TouchableWithoutFeedback>
       </Modal>
 
