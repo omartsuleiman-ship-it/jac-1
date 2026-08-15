@@ -268,16 +268,16 @@ export default function DiagnosticsScreen() {
 
   // --- Smooth Animation Trigger ---
   useEffect(() => {
-    if (liveData.rpm !== null) {
+    if (connected && liveData.rpm !== null) {
       Animated.timing(rpmAnim, {
         toValue: liveData.rpm,
-        duration: 750, // Matches the polling interval for a continuous, silky smooth sweep
-        useNativeDriver: false, // SVG props cannot use native driver
+        duration: 750,
+        useNativeDriver: false,
       }).start();
     } else {
       rpmAnim.setValue(0);
     }
-  }, [liveData.rpm]);
+  }, [liveData.rpm, connected]);
 
   // ---------------------------------------------------------------------------
   // Readiness & Misfire Counters
@@ -344,6 +344,15 @@ export default function DiagnosticsScreen() {
   // ---------------------------------------------------------------------------
   const faultCount = faults?.length ?? 0;
   const stopCount = useMemo(() => faults?.filter((f) => f.urgency === 'STOP').length ?? 0, [faults]);
+
+  // حارس أمان: لو مفيش اتصال، حوّل أي أصفار وهمية لـ null عشان الواجهة ترجع لوضع الانتظار
+  const actualRpm = connected ? liveData.rpm : null;
+  const actualCoolant = connected ? liveData.coolant : null;
+  const actualVoltage = connected ? liveData.voltage : null;
+  const actualEngineLoad = connected ? liveData.engineLoad : null;
+  const actualMaf = connected ? liveData.maf : null;
+  const actualO2 = connected ? liveData.o2 : null;
+  const actualFuelTrim = connected ? liveData.fuelTrim : null;
 
   // ---------------------------------------------------------------------------
   // Render
@@ -439,10 +448,10 @@ export default function DiagnosticsScreen() {
             {/* ── 3D Interactive RPM Gauge ── */}
             <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
               <View style={{ width: '100%', flexDirection: dir, justifyContent: 'space-between', position: 'absolute', top: 16, paddingHorizontal: 16 }}>
-                <View style={[styles.statusBadge, { backgroundColor: liveData.rpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(liveData.rpm).tone), flexDirection: dir }]}>
-                  <View style={[styles.miniDot, { backgroundColor: liveData.rpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(liveData.rpm).tone) }]} />
-                  <Text style={[styles.statusBadgeText, { color: liveData.rpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(liveData.rpm).tone) }]}>
-                    {liveData.rpm === null ? (isAr ? 'بانتظار...' : 'Waiting...') : isAr ? getRpmStatus(liveData.rpm).statusAr : getRpmStatus(liveData.rpm).statusEn}
+                <View style={[styles.statusBadge, { backgroundColor: actualRpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(actualRpm).tone), flexDirection: dir }]}>
+                  <View style={[styles.miniDot, { backgroundColor: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]} />
+                  <Text style={[styles.statusBadgeText, { color: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]}>
+                    {actualRpm === null ? (isAr ? 'بانتظار...' : 'Waiting...') : isAr ? getRpmStatus(actualRpm).statusAr : getRpmStatus(actualRpm).statusEn}
                   </Text>
                 </View>
                 <Ionicons name="speedometer-outline" size={20} color={COLORS.textTertiary} />
@@ -462,13 +471,13 @@ export default function DiagnosticsScreen() {
                   <AnimatedPath
                     d="M 20 90 A 80 80 0 0 1 180 90"
                     fill="none"
-                    stroke={liveData.rpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(liveData.rpm).tone)}
+                    stroke={actualRpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(actualRpm).tone)}
                     strokeWidth="12"
                     strokeLinecap="round"
-                    strokeDasharray={251.2} // محيط النص دائرة (Pi * 80)
+                    strokeDasharray={251.2}
                     strokeDashoffset={rpmAnim.interpolate({
                       inputRange: [0, 6000],
-                      outputRange: [251.2, 0], // 251.2 is empty, 0 is full
+                      outputRange: [251.2, 0],
                       extrapolate: 'clamp',
                     })}
                   />
@@ -476,12 +485,12 @@ export default function DiagnosticsScreen() {
                 
                 {/* الأرقام داخل العداد */}
                 <View style={{ position: 'absolute', bottom: 0, alignItems: 'center' }}>
-                  {isLiveDataLoading && liveData.rpm === null ? (
+                  {isLiveDataLoading && actualRpm === null ? (
                     <ActivityIndicator color={COLORS.accent} style={{ marginBottom: 10 }} />
                   ) : (
                     <>
                       <Text style={{ color: COLORS.textPrimary, fontSize: 42, fontWeight: '900', letterSpacing: -1, height: 48 }}>
-                        {liveData.rpm !== null ? liveData.rpm.toFixed(0) : '--'}
+                        {actualRpm !== null ? actualRpm.toFixed(0) : '--'}
                       </Text>
                       <Text style={{ color: COLORS.textSecondary, fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>RPM</Text>
                     </>
@@ -492,101 +501,91 @@ export default function DiagnosticsScreen() {
                 {isAr ? 'سرعة دوران المحرك' : 'Engine Speed'}
               </Text>
             </View>
-            {/* ── End of RPM Gauge ── */}
+
             {/* The other 6 cards (2x2x2) */}
             <LiveCard
               icon="thermometer-outline"
-              tone={getCoolantStatus(liveData.coolant).tone}
-              value={liveData.coolant !== null ? liveData.coolant.toFixed(0) : '--'}
+              tone={getCoolantStatus(actualCoolant).tone}
+              value={actualCoolant !== null ? actualCoolant.toFixed(0) : '--'}
               unit="°C"
               labelEn="Coolant Temp"
               labelAr="حرارة المحرك"
-              statusEn={getCoolantStatus(liveData.coolant).statusEn}
-              statusAr={getCoolantStatus(liveData.coolant).statusAr}
+              statusEn={getCoolantStatus(actualCoolant).statusEn}
+              statusAr={getCoolantStatus(actualCoolant).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.coolant === null}
+              isWaiting={actualCoolant === null}
             />
             <LiveCard
               icon="battery-charging-outline"
-              tone={getVoltageStatus(liveData.voltage).tone}
-              value={liveData.voltage !== null ? liveData.voltage.toFixed(1) : '--'}
+              tone={getVoltageStatus(actualVoltage).tone}
+              value={actualVoltage !== null ? actualVoltage.toFixed(1) : '--'}
               unit="V"
               labelEn="Battery Voltage"
               labelAr="جهد البطارية"
-              statusEn={getVoltageStatus(liveData.voltage).statusEn}
-              statusAr={getVoltageStatus(liveData.voltage).statusAr}
+              statusEn={getVoltageStatus(actualVoltage).statusEn}
+              statusAr={getVoltageStatus(actualVoltage).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.voltage === null}
+              isWaiting={actualVoltage === null}
             />
             <LiveCard
               icon="speedometer"
-              tone={getEngineLoadStatus(liveData.engineLoad).tone}
-              value={liveData.engineLoad !== null ? liveData.engineLoad.toFixed(1) : '--'}
+              tone={getEngineLoadStatus(actualEngineLoad).tone}
+              value={actualEngineLoad !== null ? actualEngineLoad.toFixed(1) : '--'}
               unit="%"
               labelEn="Engine Load"
               labelAr="حمل المحرك"
-              statusEn={getEngineLoadStatus(liveData.engineLoad).statusEn}
-              statusAr={getEngineLoadStatus(liveData.engineLoad).statusAr}
+              statusEn={getEngineLoadStatus(actualEngineLoad).statusEn}
+              statusAr={getEngineLoadStatus(actualEngineLoad).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.engineLoad === null}
+              isWaiting={actualEngineLoad === null}
             />
             <LiveCard
               icon="flash-outline"
-              tone={getMafStatus(liveData.maf).tone}
-              value={liveData.maf !== null ? liveData.maf.toFixed(1) : '--'}
+              tone={getMafStatus(actualMaf).tone}
+              value={actualMaf !== null ? actualMaf.toFixed(1) : '--'}
               unit="g/s"
               labelEn="MAF Air Flow"
               labelAr="تدفق الهواء"
-              statusEn={getMafStatus(liveData.maf).statusEn}
-              statusAr={getMafStatus(liveData.maf).statusAr}
+              statusEn={getMafStatus(actualMaf).statusEn}
+              statusAr={getMafStatus(actualMaf).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.maf === null}
+              isWaiting={actualMaf === null}
             />
             <LiveCard
               icon="analytics-outline"
-              tone={getO2Status(liveData.o2).tone}
-              value={liveData.o2 !== null ? liveData.o2.toFixed(2) : '--'}
+              tone={getO2Status(actualO2).tone}
+              value={actualO2 !== null ? actualO2.toFixed(2) : '--'}
               unit="V"
               labelEn="O2 Sensor"
               labelAr="حساس الأكسجين"
-              statusEn={getO2Status(liveData.o2).statusEn}
-              statusAr={getO2Status(liveData.o2).statusAr}
+              statusEn={getO2Status(actualO2).statusEn}
+              statusAr={getO2Status(actualO2).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.o2 === null}
-              onPress={() =>
-                openSensorAdvice(
-                  'O2 Sensor — Checking',
-                  'حساس الأكسجين — قيد الفحص',
-                  'No need to stop; drive normally while the module finishes evaluating the sensor.',
-                  'مفيش داعي تقف؛ كمل السواقة عادي لحد ما الكمبيوتر يخلص تقييم الحساس.',
-                  ['Check sensor connector.', 'Inspect for exhaust leak.'],
-                  ['افحص وصلة الحساس.', 'افحص أي تسريب في العادم.']
-                )
-              }
+              isWaiting={actualO2 === null}
             />
             <LiveCard
               icon="options-outline"
-              tone={getFuelTrimStatus(liveData.fuelTrim).tone}
-              value={liveData.fuelTrim !== null ? liveData.fuelTrim.toFixed(1) : '--'}
+              tone={getFuelTrimStatus(actualFuelTrim).tone}
+              value={actualFuelTrim !== null ? actualFuelTrim.toFixed(1) : '--'}
               unit="%"
               labelEn="Fuel Trim"
               labelAr="ضبط الوقود"
-              statusEn={getFuelTrimStatus(liveData.fuelTrim).statusEn}
-              statusAr={getFuelTrimStatus(liveData.fuelTrim).statusAr}
+              statusEn={getFuelTrimStatus(actualFuelTrim).statusEn}
+              statusAr={getFuelTrimStatus(actualFuelTrim).statusAr}
               isAr={isAr}
               dir={dir}
               isLoading={isLiveDataLoading}
-              isWaiting={liveData.fuelTrim === null}
+              isWaiting={actualFuelTrim === null}
             />
           </View>
         )}
