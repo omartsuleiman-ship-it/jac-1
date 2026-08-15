@@ -4,6 +4,7 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
+  Alert,
   ImageBackground,
   Linking,
   Platform,
@@ -14,6 +15,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { STORAGE_KEY_LAST_PARKED } from '../services/bleService';
 import { useLang } from './_layout';
 
 const COLORS = {
@@ -24,6 +26,7 @@ const COLORS = {
   glassBorder: 'rgba(255, 255, 255, 0.12)', 
   success: '#00E676',
   warning: '#F2C94C',
+  danger: '#FF6B5E',
 };
 
 export default function HomeScreen() {
@@ -105,12 +108,21 @@ export default function HomeScreen() {
         if (!result.success) return; // المستخدم ألغى البصمة
       }
 
-      // إحداثيات (مجاورة 46، العاشر من رمضان) كمثال حالي لحد ما نربطها بحفظ موقع الركنة
-      const lat = 30.2858;
-      const lng = 31.7431;
-      
+      const stored = await AsyncStorage.getItem(STORAGE_KEY_LAST_PARKED);
+      if (!stored) {
+        Alert.alert(
+          isAr ? 'مفيش موقع محفوظ' : 'No Location Saved',
+          isAr
+            ? 'لسه ما تسجلش موقع ركنة. هيتسجل تلقائياً أول ما جهاز الـ OBD يفصل من العربية.'
+            : 'No parked location has been recorded yet. It will be saved automatically the next time the OBD dongle disconnects.'
+        );
+        return;
+      }
+
+      const parked = JSON.parse(stored) as { latitude: number; longitude: number; timestamp: number };
+
       // توجيه مباشر لجوجل مابس (بيفتح التطبيق لو متسطب أو المتصفح لو لأ)
-      const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`;
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${parked.latitude},${parked.longitude}&travelmode=walking`;
       Linking.openURL(url).catch(() => {});
     } catch (e) {
       console.warn(e);

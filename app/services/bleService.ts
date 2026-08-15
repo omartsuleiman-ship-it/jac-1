@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
 import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 
@@ -8,6 +9,12 @@ export const bleManager = new BleManager();
 // ── OBD-II Service & Characteristic UUIDs ──
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
 const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
+
+// ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx / trip.tsx exactly ──
+const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
+
+// ── Exported so index.tsx reads the exact same key, never a hardcoded literal ──
+export const STORAGE_KEY_LAST_PARKED = '@last_parked_location';
 
 // ── Pure-JS ASCII <-> Base64 helpers (RN has no global Buffer/Node polyfill) ──
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -59,14 +66,12 @@ const base64ToAscii = (input: string): string => {
   return output;
 };
 
-// ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx / trip.tsx exactly ──
-const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
-
 // ── State ──
 let connectedDevice: Device | null = null;
 let writeCharacteristic: Characteristic | null = null;
 let notifyCharacteristic: Characteristic | null = null;
 let writeWithoutResponseMode = false;
+let disconnectSubscription: { remove: () => void } | null = null;
 
 // ── Response buffering: BLE notifications arrive in chunks; ELM327 terminates every reply with '>' ──
 let responseBuffer = '';
@@ -209,6 +214,39 @@ const fetchAndSaveTrueOdometer = async (): Promise<void> => {
   }
 };
 
+// ── Capture the phone's current GPS position and persist it as "where the
+// car was last parked". Fires from the device-level onDisconnected event so
+// it covers BOTH a manual disconnect AND the far more common real-world
+// case: the ignition turns off, the ELM327 loses power, and BLE drops
+// unexpectedly — which is exactly the moment the user has actually parked. ──
+const captureLastParkedLocation = async (): Promise<void> => {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      console.warn('[BLE] Location permission not granted — cannot save parked location');
+      return;
+    }
+
+    const position = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+
+    const parked = {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      timestamp: Date.now(),
+    };
+
+    await AsyncStorage.setItem(STORAGE_KEY_LAST_PARKED, JSON.stringify(parked));
+    console.log(`[BLE] Last parked location saved: ${parked.latitude}, ${parked.longitude}`);
+  } catch (error) {
+    // Deliberately don't touch AsyncStorage on failure — an old, correct
+    // saved location is more useful to the user than silently wiping it
+    // because of a transient GPS/permission glitch
+    console.warn('[BLE] Failed to capture last-parked location:', error);
+  }
+};
+
 // ── Dynamically find the UART TX/RX characteristic instead of trusting a hardcoded UUID ──
 const discoverOBDCharacteristic = async (
   device: Device
@@ -264,6 +302,20 @@ const discoverOBDCharacteristic = async (
 // ── Set the connected device after successful connection ──
 export const setOBDDevice = async (device: Device) => {
   connectedDevice = device;
+
+  // Fires on ANY disconnect — manual (disconnectBleDevice) or unexpected
+  // (dongle lost power / went out of range, e.g. the car was just turned off)
+  disconnectSubscription?.remove();
+  disconnectSubscription = device.onDisconnected(() => {
+    console.log('[BLE] Device disconnected — capturing last-parked location');
+    captureLastParkedLocation();
+    connectedDevice = null;
+    writeCharacteristic = null;
+    notifyCharacteristic = null;
+    notifySubscription?.remove();
+    notifySubscription = null;
+  });
+
   await device.discoverAllServicesAndCharacteristics();
   try {
     const { writeChar, notifyChar } = await discoverOBDCharacteristic(device);
@@ -333,6 +385,15 @@ export const disconnectBleDevice = async (deviceId: string) => {
   } catch (error) {
     console.error('Error disconnecting:', error);
   } finally {
+    // Capture directly here too — don't rely solely on the onDisconnected
+    // listener above, since its firing order relative to
+    // cancelDeviceConnection() resolving isn't guaranteed across platforms.
+    // A harmless duplicate write from the listener firing shortly after is
+    // fine; a missed one isn't.
+    captureLastParkedLocation();
+
+    disconnectSubscription?.remove();
+    disconnectSubscription = null;
     notifySubscription?.remove();
     notifySubscription = null;
     responseBuffer = '';
