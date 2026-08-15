@@ -5,12 +5,12 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "mycarapp",
+    "scheme": "jac",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.omartamer.mycarapp",
+      "bundleIdentifier": "com.omartamer.jac",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSBluetoothAlwaysUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
@@ -31,7 +31,7 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT"
       ],
-      "package": "com.anonymous.mycarapp"
+      "package": "com.anonymous.jac"
     },
     "web": {
       "output": "static",
