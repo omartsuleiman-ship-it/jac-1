@@ -673,29 +673,48 @@ const querySafetyECU = async (
   }
 };
 
+// ── TPMS: 4-wheel pressure shape used by <TPMSCard/> in diagnostics.tsx ──
+export type TirePressures = { fl: number | null; fr: number | null; rl: number | null; rr: number | null };
+const EMPTY_TIRE_PRESSURES: TirePressures = { fl: null, fr: null, rl: null, rr: null };
+
+// We do not yet know JAC's exact TPMS payload layout (byte order per wheel,
+// scaling factor, or whether all 4 values even come back in one response vs.
+// needing separate frames). Rather than guess an offset and silently show a
+// fabricated pressure, this returns nulls until a real [BLE] raw response is
+// captured and the layout is confirmed — update the body below at that point.
+const parseTPMSResponse = (raw: string): TirePressures => {
+  const hex = raw.replace(/[\s>]/g, '').toUpperCase();
+  const idx = hex.indexOf('62D001');
+  if (idx === -1) return EMPTY_TIRE_PRESSURES;
+  // const data = hex.substring(idx + 6);
+  // const bytes = data.match(/.{1,2}/g) || [];
+  // TODO: confirm FL/FR/RL/RR byte order + PSI scaling from a live capture,
+  // then return { fl, fr, rl, rr } parsed from `bytes` instead of nulls.
+  return EMPTY_TIRE_PRESSURES;
+};
+
 export const getExtraSafetyData = async () => {
-  let atfTemp = null;
-  let absPressure = null;
-  let tirePressure = null;
+  let atfTemp: number | null = null;
+  let absPressure: number | null = null;
+  let tirePressure: TirePressures = EMPTY_TIRE_PRESSURES;
 
+  // Note: these run sequentially in practice — the command queue serializes
+  // all BLE writes since ELM327 is half-duplex — but Promise.all lets us
+  // fire all three without one probe's rejection ever skipping the others.
   const [atf, abs, tpms] = await Promise.all([
-    // Note: sequential, not truly parallel — the command queue serializes
-    // these automatically since ELM327 is half-duplex, so Promise.all here
-    // just lets us fire the three requests without one's rejection stopping
-    // the others.
-  ].length
-    ? []
-    : [
-        querySafetyECU('7E1', '222001', 'Transmission (ATF temp)'),
-        querySafetyECU('7B0', '22C001', 'ABS (brake pressure)'),
-        querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)'),
-      ]);
+    querySafetyECU('7E1', '222001', 'Transmission (ATF temp)'),
+    querySafetyECU('7B0', '22C001', 'ABS (brake pressure)'),
+    querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)'),
+  ]);
 
-  // Parsing logic goes here once we confirm JAC's exact hex format from the
-  // [BLE] raw response logs above — atf.raw / abs.raw / tpms.raw hold it.
+  // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
+  // format from the [BLE] raw response logs above — atf.raw / abs.raw hold it.
   void atf;
   void abs;
-  void tpms;
+
+  if (tpms.ok) {
+    tirePressure = parseTPMSResponse(tpms.raw);
+  }
 
   // ⚠️ Always return to the Engine ECU header, no matter what happened above,
   // so getLiveData's RPM/coolant/etc. polling never hangs on a stale header
