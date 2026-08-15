@@ -102,6 +102,26 @@ export default function TripCostScreen() {
   const [extraCosts, setExtraCosts] = useState('');
   const [passengers, setPassengers] = useState('1');
   const [isCalculated, setIsCalculated] = useState(false);
+  
+  const [recentTrips, setRecentTrips] = useState<any[]>([]);
+
+  // ── Load Crash Recovery & History on Mount ──
+  useEffect(() => {
+    const loadState = async () => {
+      const history = await AsyncStorage.getItem('@recent_trips');
+      if (history) setRecentTrips(JSON.parse(history));
+
+      const active = await AsyncStorage.getItem('@trip_active');
+      if (active === 'true') {
+        const savedDist = await AsyncStorage.getItem('@trip_dist');
+        const savedFuel = await AsyncStorage.getItem('@trip_fuel');
+        if (savedDist) setDistanceKm(parseFloat(savedDist));
+        if (savedFuel) setFuelConsumedLiters(parseFloat(savedFuel));
+        setTripActive(true);
+      }
+    };
+    loadState();
+  }, []);
 
   useEffect(() => {
     let subscription: Location.LocationSubscription | null = null;
@@ -198,13 +218,18 @@ export default function TripCostScreen() {
 
           const deltaKm = speedKmh * hoursElapsed;
           tripOdometerDeltaRef.current += deltaKm;
-          setDistanceKm((prev) => prev + deltaKm);
+          setDistanceKm((prev) => {
+            const newDist = prev + deltaKm;
+            AsyncStorage.setItem('@trip_dist', newDist.toString()).catch(() => {});
+            return newDist;
+          });
 
           const deltaLiters = (mafGramsPerSec / 14.7 / 740) * secondsElapsed;
           setFuelConsumedLiters((prev) => {
             const newTotal = prev + deltaLiters;
             const liveCost = newTotal * fuelPriceRef.current;
             AsyncStorage.setItem('@live_trip_cost', liveCost.toFixed(2)).catch(() => {});
+            AsyncStorage.setItem('@trip_fuel', newTotal.toString()).catch(() => {});
             return newTotal;
           });
         }
@@ -512,6 +537,27 @@ export default function TripCostScreen() {
               </Text>
             </TouchableOpacity>
           </View>
+
+          {/* ── RECENT TRIPS HISTORY ── */}
+          {recentTrips.length > 0 && (
+            <View style={[styles.card, { marginTop: 16 }]}>
+              <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
+                {isAr ? 'آخر 5 رحلات' : 'Last 5 Trips'}
+              </Text>
+              {recentTrips.map((trip) => (
+                <View key={trip.id} style={{ borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder, paddingVertical: 12 }}>
+                  <View style={{ flexDirection: dir, justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text style={{ color: COLORS.textPrimary, fontSize: 14, fontWeight: '700' }}>
+                      {trip.from} <Ionicons name="arrow-forward" size={12} color={COLORS.textSecondary} /> {trip.to}
+                    </Text>
+                    <Text style={{ color: COLORS.accent, fontSize: 15, fontWeight: '800' }}>{trip.cost} {isAr ? 'ج' : 'EGP'}</Text>
+                  </View>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 11, textAlign: isAr ? 'right' : 'left' }}>{trip.date}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
         </ScrollView>
       </KeyboardAvoidingView>
 
@@ -561,7 +607,19 @@ export default function TripCostScreen() {
 
             {/* Calculate Button or Result */}
             {!isCalculated ? (
-              <TouchableOpacity style={styles.calcButton} onPress={() => setIsCalculated(true)}>
+              <TouchableOpacity style={styles.calcButton} onPress={() => {
+                setIsCalculated(true);
+                const newTrip = {
+                  id: Date.now().toString(),
+                  date: new Date().toLocaleDateString('en-GB'),
+                  from: fromText || (isAr ? 'غير محدد' : 'Blank'),
+                  to: toText || (isAr ? 'غير محدد' : 'Blank'),
+                  cost: totalCost.toFixed(2)
+                };
+                const updated = [newTrip, ...recentTrips].slice(0, 5);
+                setRecentTrips(updated);
+                AsyncStorage.setItem('@recent_trips', JSON.stringify(updated)).catch(()=>{});
+              }}>
                 <Text style={styles.calcButtonText}>{isAr ? 'حساب التكلفة للفرد' : 'Calculate Per Person'}</Text>
               </TouchableOpacity>
             ) : (

@@ -4,7 +4,6 @@ import * as LocalAuthentication from 'expo-local-authentication';
 import { router } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
   ImageBackground,
   Linking,
   Platform,
@@ -179,17 +178,14 @@ export default function HomeScreen() {
 
                 {/* Live Trip Cost (Appears ONLY when trip is running) */}
                 {isTripActive && (
-                  <View style={[styles.widgetFull, { flexDirection: isAr ? 'row-reverse' : 'row', alignItems: 'center', justifyContent: 'space-between', borderColor: COLORS.accent, backgroundColor: 'rgba(0, 217, 198, 0.05)' }]}>
-                    <View style={{ flexDirection: isAr ? 'row-reverse' : 'row', alignItems: 'center', gap: 12 }}>
-                      <View style={[styles.healthIconWrap, { backgroundColor: 'rgba(0, 217, 198, 0.15)' }]}>
-                        <Ionicons name="cash-outline" size={20} color={COLORS.accent} />
-                      </View>
-                      <View style={{ alignItems: isAr ? 'flex-end' : 'flex-start' }}>
-                        <Text style={styles.widgetTitle}>{isAr ? 'تكلفة الرحلة الحالية' : 'Live Trip Cost'}</Text>
-                        <Text style={[styles.widgetValue, { color: COLORS.accent }]}>{liveTripCost} <Text style={styles.widgetUnit}>{isAr ? 'جنيه' : 'EGP'}</Text></Text>
-                      </View>
+                  <View style={[styles.widgetFull, { flexDirection: isAr ? 'row-reverse' : 'row', alignItems: 'center', justifyContent: 'flex-start', borderColor: COLORS.accent, backgroundColor: 'rgba(0, 217, 198, 0.05)', gap: 12 }]}>
+                    <View style={[styles.healthIconWrap, { backgroundColor: 'rgba(0, 217, 198, 0.15)' }]}>
+                      <Ionicons name="cash-outline" size={20} color={COLORS.accent} />
                     </View>
-                    <ActivityIndicator color={COLORS.accent} size="small" />
+                    <View style={{ flex: 1, alignItems: isAr ? 'flex-end' : 'flex-start' }}>
+                      <Text style={styles.widgetTitle}>{isAr ? 'تكلفة الرحلة الحالية' : 'Live Trip Cost'}</Text>
+                      <Text style={[styles.widgetValue, { color: COLORS.accent }]}>{liveTripCost} <Text style={styles.widgetUnit}>{isAr ? 'جنيه' : 'EGP'}</Text></Text>
+                    </View>
                   </View>
                 )}
 

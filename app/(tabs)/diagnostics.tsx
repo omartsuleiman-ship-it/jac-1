@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Modal,
   Pressable,
   SafeAreaView,
@@ -18,6 +19,8 @@ import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constant
 import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
+
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 // -----------------------------------------------------------------------------
 // Constants & Types
@@ -129,6 +132,9 @@ type AdviceContent = {
 export default function DiagnosticsScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
+
+  // --- Animation State for RPM ---
+  const rpmAnim = useRef(new Animated.Value(0)).current;
 
   // Tab state
   const [activeView, setActiveView] = useState<ViewMode>('SCANNER');
@@ -253,12 +259,25 @@ export default function DiagnosticsScreen() {
     let interval: ReturnType<typeof setInterval> | null = null;
     if (activeView === 'LIVE_DATA') {
       fetchLiveData(true); // Load only on the very first fetch
-      interval = setInterval(() => fetchLiveData(false), 1000); // Silent updates thereafter
+      interval = setInterval(() => fetchLiveData(false), 800); // Speed up polling slightly
     }
     return () => {
       if (interval) clearInterval(interval);
     };
   }, [activeView, fetchLiveData]);
+
+  // --- Smooth Animation Trigger ---
+  useEffect(() => {
+    if (liveData.rpm !== null) {
+      Animated.timing(rpmAnim, {
+        toValue: liveData.rpm,
+        duration: 750, // Matches the polling interval for a continuous, silky smooth sweep
+        useNativeDriver: false, // SVG props cannot use native driver
+      }).start();
+    } else {
+      rpmAnim.setValue(0);
+    }
+  }, [liveData.rpm]);
 
   // ---------------------------------------------------------------------------
   // Readiness & Misfire Counters
@@ -439,15 +458,19 @@ export default function DiagnosticsScreen() {
                     strokeWidth="12"
                     strokeLinecap="round"
                   />
-                  {/* مسار العداد الملون (التفاعلي) */}
-                  <Path
+                  {/* مسار العداد الملون (التفاعلي السلس) */}
+                  <AnimatedPath
                     d="M 20 90 A 80 80 0 0 1 180 90"
                     fill="none"
                     stroke={liveData.rpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(liveData.rpm).tone)}
                     strokeWidth="12"
                     strokeLinecap="round"
                     strokeDasharray={251.2} // محيط النص دائرة (Pi * 80)
-                    strokeDashoffset={liveData.rpm === null ? 251.2 : 251.2 - (Math.min(liveData.rpm / 6000, 1) * 251.2)}
+                    strokeDashoffset={rpmAnim.interpolate({
+                      inputRange: [0, 6000],
+                      outputRange: [251.2, 0], // 251.2 is empty, 0 is full
+                      extrapolate: 'clamp',
+                    })}
                   />
                 </Svg>
                 
