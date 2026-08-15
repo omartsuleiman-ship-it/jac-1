@@ -1,6 +1,6 @@
 // diagnostics.tsx
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Audio } from 'expo-av';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -13,12 +13,11 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
-  Vibration,
-  View,
+  View
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
+import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -54,10 +53,7 @@ const urgencyDim = (tone: 'danger' | 'warning' | 'accent' | 'success') =>
   tone === 'danger' ? COLORS.dangerDim : tone === 'warning' ? COLORS.warningDim : tone === 'success' ? COLORS.successDim : COLORS.accentDim;
 
 // -----------------------------------------------------------------------------
-// Live Data thresholds — calibrated for a 2016 JAC S3 1.5L NA VVT, ~145,000 km.
-// Ranges are widened slightly vs. factory-new spec to reflect normal wear at
-// this mileage (idle drift, minor injector/vacuum aging, alternator brush wear)
-// without masking genuine faults.
+// Live Data thresholds
 // -----------------------------------------------------------------------------
 type CardStatus = { tone: 'success' | 'warning' | 'danger'; statusEn: string; statusAr: string };
 
@@ -72,7 +68,6 @@ const getCoolantStatus = (c: number | null): CardStatus => {
   if (c === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
   if (c > 115) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
   if (c >= 106 && c <= 115) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
-  // From 0 to 105 is normal (covers cold start and normal operating temp)
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
@@ -109,6 +104,28 @@ const getEngineLoadStatus = (load: number | null): CardStatus => {
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
+// --- NEW Extra Safety Data Thresholds ---
+const getAtfTempStatus = (temp: number | null): CardStatus => {
+  if (temp === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (temp > 110) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (temp > 90 && temp <= 110) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getAbsPressureStatus = (pressure: number | null): CardStatus => {
+  if (pressure === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (pressure < 10) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+
+const getTirePressureStatus = (pressure: number | null): CardStatus => {
+  if (pressure === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
+  if (pressure < 25 || pressure > 45) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
+  if (pressure >= 26 && pressure <= 29) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
+  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
+};
+// -----------------------------------------------------------------------------
+
 type ViewMode = 'SCANNER' | 'LIVE_DATA' | 'READINESS';
 
 type FaultStatus = 'ready' | 'loading' | 'error';
@@ -135,32 +152,9 @@ export default function DiagnosticsScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
 
- // --- Animation State for RPM ---
+  // --- Animation State for RPM ---
   const rpmAnim = useRef(new Animated.Value(0)).current;
 
-  // --- Danger Alarm State ---
-  const [dangerSound, setDangerSound] = useState<Audio.Sound | null>(null);
-  const hasDangerRef = useRef(false);
-
-  // Load Danger Sound on Mount
-  useEffect(() => {
-    async function loadSound() {
-      try {
-        // استخدام رابط صوت إنذار مباشر عشان منضطرش نحمل ملفات محلية
-        const { sound } = await Audio.Sound.createAsync(
-          { uri: 'https://actions.google.com/sounds/v1/alarms/digital_watch_alarm_long.ogg' }
-        );
-        await sound.setIsLoopingAsync(true); // يفضل يرن لحد ما المشكلة تختفي
-        setDangerSound(sound);
-      } catch (error) {
-        console.warn("Couldn't load alarm sound", error);
-      }
-    }
-    loadSound();
-    return () => {
-      dangerSound?.unloadAsync();
-    };
-  }, []);
 
   // Tab state
   const [activeView, setActiveView] = useState<ViewMode>('SCANNER');
@@ -170,7 +164,7 @@ export default function DiagnosticsScreen() {
   const [faults, setFaults] = useState<FaultItem[] | null>(null);
   const scanIdRef = useRef(0);
 
-  // --- LIVE DATA state (initialised to null) ---
+  // --- LIVE DATA state (Engine) ---
   const [liveData, setLiveData] = useState<{
     rpm: number | null;
     coolant: number | null;
@@ -180,23 +174,23 @@ export default function DiagnosticsScreen() {
     o2: number | null;
     fuelTrim: number | null;
   }>({
-    rpm: null,
-    coolant: null,
-    voltage: null,
-    engineLoad: null,
-    maf: null,
-    o2: null,
-    fuelTrim: null,
+    rpm: null, coolant: null, voltage: null, engineLoad: null, maf: null, o2: null, fuelTrim: null,
   });
+
+  // --- EXTRA SAFETY DATA state (TCM, ABS, TPMS) ---
+  const [extraSafetyData, setExtraSafetyData] = useState<{
+    atfTemp: number | null;
+    absPressure: number | null;
+    tirePressure: number | null;
+  }>({
+    atfTemp: null, absPressure: null, tirePressure: null,
+  });
+
   const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
 
   // --- READINESS state ---
   const [readiness, setReadiness] = useState<{
-    misfire: boolean;
-    fuel: boolean;
-    catalyst: boolean;
-    evap: boolean;
-    o2sensor: boolean;
+    misfire: boolean; fuel: boolean; catalyst: boolean; evap: boolean; o2sensor: boolean;
   } | null>(null);
   const [misfireCounters, setMisfireCounters] = useState<{ cylinder: number; count: number }[] | null>(null);
   const [isReadinessLoading, setIsReadinessLoading] = useState(false);
@@ -204,9 +198,7 @@ export default function DiagnosticsScreen() {
   // --- Advice Modal ---
   const [adviceModalVisible, setAdviceModalVisible] = useState(false);
   const [currentAdvice, setCurrentAdvice] = useState<AdviceContent>({
-    title: '',
-    immediateGuidance: '',
-    steps: [],
+    title: '', immediateGuidance: '', steps: [],
   });
 
   // --- Connection state ---
@@ -215,7 +207,7 @@ export default function DiagnosticsScreen() {
   const statusText = connected ? (isAr ? 'متصل' : 'Connected') : (isAr ? 'غير متصل' : 'Disconnected');
 
   // ---------------------------------------------------------------------------
-  // DTC Scan (Mode 03)
+  // DTC Scan (Mode 03 + Multi-ECU)
   // ---------------------------------------------------------------------------
   const resolveFaultCode = async (code: string, moduleName: string | undefined, scanId: number) => {
     try {
@@ -250,6 +242,9 @@ export default function DiagnosticsScreen() {
 
       setFaults(initialFaults);
       initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, f.module, thisScan));
+      
+      // السطر ده عشان يحفظ الأعطال وتسمّع في الشاشة الرئيسية بره
+      AsyncStorage.setItem('@stored_faults', JSON.stringify(initialFaults)).catch(() => {});
     } catch (error) {
       console.error('Scan failed:', error);
       Alert.alert('Error', isAr ? 'فشل الفحص' : 'Scan failed');
@@ -266,9 +261,9 @@ export default function DiagnosticsScreen() {
   };
 
   // ---------------------------------------------------------------------------
-  // Live Data (Mode 01 PIDs)
+  // Live Data & Multi-ECU Polling
   // ---------------------------------------------------------------------------
-  const fetchLiveData = useCallback(async (isInitial = false) => {
+  const fetchLiveDataWrapper = useCallback(async (isInitial = false) => {
     if (isInitial) setIsLiveDataLoading(true);
     try {
       const data = await getLiveData();
@@ -280,19 +275,35 @@ export default function DiagnosticsScreen() {
     }
   }, []);
 
-  // Poll live data when the tab is active
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null;
-    if (activeView === 'LIVE_DATA') {
-      fetchLiveData(true); // Load only on the very first fetch
-      interval = setInterval(() => fetchLiveData(false), 800); // Speed up polling slightly
+  const fetchExtraSafetyWrapper = useCallback(async () => {
+    try {
+      const data = await getExtraSafetyData();
+      setExtraSafetyData(data);
+    } catch (error) {
+      console.warn('Failed to fetch extra safety data:', error);
     }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [activeView, fetchLiveData]);
+  }, []);
 
-  // --- Smooth Animation Trigger ---
+  // Poll live data with Dual-Timers
+  useEffect(() => {
+    let intervalFast: ReturnType<typeof setInterval> | null = null;
+    let intervalSlow: ReturnType<typeof setInterval> | null = null;
+    
+    if (activeView === 'LIVE_DATA') {
+      fetchLiveDataWrapper(true); 
+      fetchExtraSafetyWrapper();
+      
+      intervalFast = setInterval(() => fetchLiveDataWrapper(false), 800); // Fast for Engine RPM
+      intervalSlow = setInterval(() => fetchExtraSafetyWrapper(), 5000); // Slow for Multi-ECU Safety (Trans, ABS, Tires)
+    }
+    
+    return () => {
+      if (intervalFast) clearInterval(intervalFast);
+      if (intervalSlow) clearInterval(intervalSlow);
+    };
+  }, [activeView, fetchLiveDataWrapper, fetchExtraSafetyWrapper]);
+
+  // Smooth Animation Trigger
   useEffect(() => {
     if (connected && liveData.rpm !== null) {
       Animated.timing(rpmAnim, {
@@ -348,30 +359,13 @@ export default function DiagnosticsScreen() {
     setAdviceModalVisible(true);
   };
 
-  const openSensorAdvice = (
-    titleEn: string,
-    titleAr: string,
-    immediateEn: string,
-    immediateAr: string,
-    stepsEn: string[],
-    stepsAr: string[]
-  ) => {
-    setCurrentAdvice({
-      title: isAr ? titleAr : titleEn,
-      urgency: 'CAUTION',
-      immediateGuidance: isAr ? immediateAr : immediateEn,
-      steps: isAr ? stepsAr : stepsEn,
-    });
-    setAdviceModalVisible(true);
-  };
-
   // ---------------------------------------------------------------------------
   // Computed values for UI
   // ---------------------------------------------------------------------------
   const faultCount = faults?.length ?? 0;
   const stopCount = useMemo(() => faults?.filter((f) => f.urgency === 'STOP').length ?? 0, [faults]);
 
-  // حارس أمان: لو مفيش اتصال، حوّل أي أصفار وهمية لـ null عشان الواجهة ترجع لوضع الانتظار
+  // Safe UI Variables
   const actualRpm = connected ? liveData.rpm : null;
   const actualCoolant = connected ? liveData.coolant : null;
   const actualVoltage = connected ? liveData.voltage : null;
@@ -379,41 +373,11 @@ export default function DiagnosticsScreen() {
   const actualMaf = connected ? liveData.maf : null;
   const actualO2 = connected ? liveData.o2 : null;
   const actualFuelTrim = connected ? liveData.fuelTrim : null;
+  
+  const actualAtfTemp = connected ? extraSafetyData.atfTemp : null;
+  const actualAbsPressure = connected ? extraSafetyData.absPressure : null;
+  const actualTirePressure = connected ? extraSafetyData.tirePressure : null;
 
-  // --- Watchdog: Monitor for Danger ---
-  useEffect(() => {
-    // نتأكد إننا في شاشة اللايف داتا وإن في اتصال
-    if (activeView === 'LIVE_DATA' && connected) {
-      const isDanger =
-        getVoltageStatus(actualVoltage).tone === 'danger' ||
-        getCoolantStatus(actualCoolant).tone === 'danger' ||
-        getRpmStatus(actualRpm).tone === 'danger' ||
-        getFuelTrimStatus(actualFuelTrim).tone === 'danger';
-
-      if (isDanger && !hasDangerRef.current) {
-        hasDangerRef.current = true;
-        Vibration.vibrate([0, 500, 200, 500], true); // هزاز متكرر
-        dangerSound?.playAsync();
-        
-        Alert.alert(
-          isAr ? '🚨 تحذير خطر! 🚨' : '🚨 DANGER ALERT! 🚨',
-          isAr ? 'إحدى القراءات الحيوية للمحرك وصلت لمستوى الخطر، يرجى فحص السيارة فوراً وتأمين وقوفك!' 
-               : 'A critical live data parameter has reached a dangerous level. Please pull over safely!',
-          [{ text: isAr ? 'فهمت' : 'Understood', style: 'cancel' }]
-        );
-      } else if (!isDanger && hasDangerRef.current) {
-        // لو الخطر راح، اطفي السرينة والهزاز
-        hasDangerRef.current = false;
-        Vibration.cancel();
-        dangerSound?.stopAsync();
-      }
-    } else {
-      // لو قفلنا البلوتوث أو سيبنا الشاشة
-      hasDangerRef.current = false;
-      Vibration.cancel();
-      dangerSound?.stopAsync();
-    }
-  }, [actualVoltage, actualCoolant, actualRpm, actualFuelTrim, activeView, connected, dangerSound]);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -450,7 +414,7 @@ export default function DiagnosticsScreen() {
                 <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
                   <Ionicons name="scan-outline" size={20} color="#0B0D10" />
                   <Text style={styles.scanButtonText}>
-                    {isAr ? 'فحص جميع الأعطال المسجلة' : 'Scan All Stored Faults'}
+                    {isAr ? 'فحص شامل لجميع كنترولات السيارة' : 'Full Multi-ECU Vehicle Scan'}
                   </Text>
                 </View>
               )}
@@ -497,7 +461,7 @@ export default function DiagnosticsScreen() {
               <View style={styles.emptyState}>
                 <Ionicons name="shield-checkmark-outline" size={36} color={COLORS.success} />
                 <Text style={styles.emptyStateText}>
-                  {isAr ? 'مفيش أعطال مسجلة حالياً' : 'No faults currently stored'}
+                  {isAr ? 'مفيش أعطال مسجلة في أي كنترول' : 'No faults stored in any module'}
                 </Text>
               </View>
             )}
@@ -506,7 +470,7 @@ export default function DiagnosticsScreen() {
 
         {activeView === 'LIVE_DATA' && (
           <View style={styles.liveGrid}>
-            {/* ── 3D Interactive RPM Gauge ── */}
+            {/* ── 3D Interactive RPM Gauge (Engine) ── */}
             <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
               <View style={{ width: '100%', flexDirection: dir, justifyContent: 'space-between', position: 'absolute', top: 16, paddingHorizontal: 16 }}>
                 <View style={[styles.statusBadge, { backgroundColor: actualRpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(actualRpm).tone), flexDirection: dir }]}>
@@ -520,15 +484,7 @@ export default function DiagnosticsScreen() {
 
               <View style={{ width: 220, height: 110, marginTop: 20, alignItems: 'center', justifyContent: 'flex-end' }}>
                 <Svg width="100%" height="100%" viewBox="0 0 200 100">
-                  {/* مسار العداد الخلفي (الرمادي) */}
-                  <Path
-                    d="M 20 90 A 80 80 0 0 1 180 90"
-                    fill="none"
-                    stroke={COLORS.cardBorder}
-                    strokeWidth="12"
-                    strokeLinecap="round"
-                  />
-                  {/* مسار العداد الملون (التفاعلي السلس) */}
+                  <Path d="M 20 90 A 80 80 0 0 1 180 90" fill="none" stroke={COLORS.cardBorder} strokeWidth="12" strokeLinecap="round" />
                   <AnimatedPath
                     d="M 20 90 A 80 80 0 0 1 180 90"
                     fill="none"
@@ -544,7 +500,6 @@ export default function DiagnosticsScreen() {
                   />
                 </Svg>
                 
-                {/* الأرقام داخل العداد */}
                 <View style={{ position: 'absolute', bottom: 0, alignItems: 'center' }}>
                   {isLiveDataLoading && actualRpm === null ? (
                     <ActivityIndicator color={COLORS.accent} style={{ marginBottom: 10 }} />
@@ -563,7 +518,51 @@ export default function DiagnosticsScreen() {
               </Text>
             </View>
 
-            {/* The other 6 cards (2x2x2) */}
+            {/* ── Multi-ECU Safety Cards ── */}
+            <LiveCard
+              icon="cog-outline"
+              tone={getAtfTempStatus(actualAtfTemp).tone}
+              value={actualAtfTemp !== null ? actualAtfTemp.toFixed(0) : '--'}
+              unit="°C"
+              labelEn="Trans Temp"
+              labelAr="حرارة الفتيس"
+              statusEn={getAtfTempStatus(actualAtfTemp).statusEn}
+              statusAr={getAtfTempStatus(actualAtfTemp).statusAr}
+              isAr={isAr}
+              dir={dir}
+              isLoading={isLiveDataLoading}
+              isWaiting={actualAtfTemp === null}
+            />
+            <LiveCard
+              icon="disc-outline"
+              tone={getAbsPressureStatus(actualAbsPressure).tone}
+              value={actualAbsPressure !== null ? actualAbsPressure.toFixed(1) : '--'}
+              unit="bar"
+              labelEn="Brake Press"
+              labelAr="ضغط الفرامل"
+              statusEn={getAbsPressureStatus(actualAbsPressure).statusEn}
+              statusAr={getAbsPressureStatus(actualAbsPressure).statusAr}
+              isAr={isAr}
+              dir={dir}
+              isLoading={isLiveDataLoading}
+              isWaiting={actualAbsPressure === null}
+            />
+            <LiveCard
+              icon="radio-button-on-outline"
+              tone={getTirePressureStatus(actualTirePressure).tone}
+              value={actualTirePressure !== null ? actualTirePressure.toFixed(1) : '--'}
+              unit="PSI"
+              labelEn="Tire Pressure"
+              labelAr="ضغط الكاوتش"
+              statusEn={getTirePressureStatus(actualTirePressure).statusEn}
+              statusAr={getTirePressureStatus(actualTirePressure).statusAr}
+              isAr={isAr}
+              dir={dir}
+              isLoading={isLiveDataLoading}
+              isWaiting={actualTirePressure === null}
+            />
+
+            {/* ── Standard Engine Cards ── */}
             <LiveCard
               icon="thermometer-outline"
               tone={getCoolantStatus(actualCoolant).tone}
@@ -583,7 +582,7 @@ export default function DiagnosticsScreen() {
               tone={getVoltageStatus(actualVoltage).tone}
               value={actualVoltage !== null ? actualVoltage.toFixed(1) : '--'}
               unit="V"
-              labelEn="Battery Voltage"
+              labelEn="Battery Volt"
               labelAr="جهد البطارية"
               statusEn={getVoltageStatus(actualVoltage).statusEn}
               statusAr={getVoltageStatus(actualVoltage).statusAr}
@@ -611,7 +610,7 @@ export default function DiagnosticsScreen() {
               tone={getMafStatus(actualMaf).tone}
               value={actualMaf !== null ? actualMaf.toFixed(1) : '--'}
               unit="g/s"
-              labelEn="MAF Air Flow"
+              labelEn="MAF Flow"
               labelAr="تدفق الهواء"
               statusEn={getMafStatus(actualMaf).statusEn}
               statusAr={getMafStatus(actualMaf).statusAr}
@@ -626,7 +625,7 @@ export default function DiagnosticsScreen() {
               value={actualO2 !== null ? actualO2.toFixed(2) : '--'}
               unit="V"
               labelEn="O2 Sensor"
-              labelAr="حساس الأكسجين"
+              labelAr="الأكسجين"
               statusEn={getO2Status(actualO2).statusEn}
               statusAr={getO2Status(actualO2).statusAr}
               isAr={isAr}
@@ -761,8 +760,7 @@ export default function DiagnosticsScreen() {
                     ? 'بيانات التفتيش غير مدعومة أو غير مطبقة بعد'
                     : 'Misfire data not supported or not implemented yet'}
                 </Text>
-
-                </View>
+              </View>
             )}
           </View>
         )}
@@ -954,7 +952,6 @@ function LiveCard({
   isWaiting?: boolean;
   fullWidth?: boolean;
 }) {
-  // Determine the actual tone to display (waiting overrides to neutral)
   const displayTone = isWaiting ? 'warning' : tone;
   const color =
     displayTone === 'success' ? COLORS.success :
@@ -967,7 +964,6 @@ function LiveCard({
     displayTone === 'danger' ? COLORS.dangerDim :
     COLORS.accentDim;
 
-  // Determine status text to show
   let displayStatusEn = statusEn;
   let displayStatusAr = statusAr;
   let displayColor = color;
@@ -1120,7 +1116,7 @@ function AdviceModal({
 }
 
 // -----------------------------------------------------------------------------
-// Styles (unchanged)
+// Styles
 // -----------------------------------------------------------------------------
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },

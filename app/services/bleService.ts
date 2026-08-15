@@ -412,9 +412,29 @@ const byteToDTC = (b1: number, b2: number): string | null => {
 
 // ── High-level OBD functions ──
 
-export const getDTCs = async (): Promise<string[]> => {
-  const response = await sendOBDCommand('03');
-  return parseDTCs(response);
+export const getDTCs = async (): Promise<{ code: string; module: string }[]> => {
+  const targets = [
+    { header: '7E0', name: 'Engine Control Module (ECM)' },
+    { header: '7E1', name: 'Transmission Control Module (TCM)' },
+    { header: '7B0', name: 'Anti-lock Braking System (ABS)' },
+    { header: '780', name: 'Supplemental Restraint System (Airbags)' },
+    { header: '7A0', name: 'Tire Pressure Monitor (TPMS)' },
+  ];
+
+  const allCodes: { code: string; module: string }[] = [];
+
+  for (const target of targets) {
+    try {
+      await sendOBDCommand(`ATSH${target.header}`, 500);
+      const response = await sendOBDCommand('03', 1500);
+      const codes = parseDTCs(response);
+      codes.forEach((code) => allCodes.push({ code, module: target.name }));
+    } catch (error) {
+      console.warn(`[BLE] No response or failed fetch from ${target.name}`);
+    }
+  }
+  await sendOBDCommand('ATSH7E0', 500);
+  return allCodes;
 };
 
 export const getLiveData = async () => {
@@ -597,4 +617,37 @@ export const getMisfireCounters = async (): Promise<{ cylinder: number; count: n
   }
   
   return counters.length > 0 ? counters : null;
+};
+
+// دالة جديدة بطيئة (كل 5 ثواني) لتجنب بطء الـ RPM، بتجيب داتا الأمان الحرجة
+export const getExtraSafetyData = async () => {
+  let atfTemp = null;
+  let absPressure = null;
+  let tirePressure = null;
+
+  try {
+    // محاولة قراءة حرارة الفتيس (Transmission)
+    await sendOBDCommand('ATSH7E1', 500);
+    const atfRes = await sendOBDCommand('222001', 800); // UDS Request
+    // (حالياً بنرجع null لو الكنترول ماردش عشان مفيش داتا وهمية تلخبطك)
+    if (!atfRes.includes('NO DATA') && !atfRes.includes('ERROR')) {
+       // Parsing logic goes here when we sniff JAC's exact hex format
+    }
+    
+    // محاولة قراءة ضغط الفرامل (ABS)
+    await sendOBDCommand('ATSH7B0', 500);
+    const absRes = await sendOBDCommand('22C001', 800);
+    
+    // محاولة قراءة ضغط الكاوتش (TPMS)
+    await sendOBDCommand('ATSH7A0', 500);
+    const tpmsRes = await sendOBDCommand('22D001', 800);
+
+  } catch (error) {
+    console.warn('[BLE] Extra Safety Data fetch failed', error);
+  } finally {
+    // ⚠️ العودة الفورية لكنترول الموتور
+    await sendOBDCommand('ATSH7E0', 500);
+  }
+
+  return { atfTemp, absPressure, tirePressure };
 };

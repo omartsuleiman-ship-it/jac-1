@@ -14,7 +14,10 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSBluetoothAlwaysUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
-        "NSBluetoothPeripheralUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth."
+        "NSBluetoothPeripheralUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
+        "UIBackgroundModes": [
+          "bluetooth-central"
+        ]
       }
     },
     "android": {
