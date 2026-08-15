@@ -93,10 +93,13 @@ const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 // bypass it. ──
 type OdometerProbe = { label: string; setup?: string; command: string };
 const ODOMETER_PROBES: OdometerProbe[] = [
-  { label: 'Standard PID 01 A6 (Odometer)', command: '01A6' },
-  { label: 'UDS DID 22 A6 (via ECU header 7E0)', setup: 'ATSH7E0', command: '22A6' },
-  { label: 'UDS DID 22 D0 01 (via ECU header 7E0)', setup: 'ATSH7E0', command: '22D001' },
-  { label: 'UDS DID 22 4A 24 (via ECU header 7E0)', setup: 'ATSH7E0', command: '224A24' },
+  // 7C0 and 720 are common headers for Instrument Clusters (IPC) where Odometer usually lives
+  { label: 'Cluster Header 7C0 - 22 D0 01', setup: 'ATSH7C0', command: '22D001' },
+  { label: 'Cluster Header 7C0 - 22 A6', setup: 'ATSH7C0', command: '22A6' },
+  { label: 'Cluster Header 720 - 22 22 06', setup: 'ATSH720', command: '222206' },
+  { label: 'Cluster Header 720 - 22 A6', setup: 'ATSH720', command: '22A6' },
+  // Reset back to Engine ECU (7E0) to ensure other app functions aren't broken after this test
+  { label: 'Reset to Engine ECU', setup: 'ATSH7E0', command: '0100' },
 ];
 
 const ASSUMED_DAILY_KM = 40;

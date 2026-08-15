@@ -27,7 +27,7 @@ const COLORS = {
 };
 
 export default function HomeScreen() {
-  const { isAr } = useLang();
+  const { isAr, toggleLanguage } = useLang();
   const [greeting, setGreeting] = useState('');
   
   // ── Live Trip State ──
@@ -134,6 +134,16 @@ export default function HomeScreen() {
                 <View style={styles.btDot} />
                 <Text style={styles.btText}>ARC 103</Text>
               </View>
+              
+              {/* زرار تغيير اللغة */}
+              <TouchableOpacity 
+                style={[styles.langButton, { flexDirection: isAr ? 'row-reverse' : 'row' }]} 
+                onPress={toggleLanguage}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="language-outline" size={16} color={COLORS.textPrimary} />
+                <Text style={styles.langText}>{isAr ? 'EN' : 'عربي'}</Text>
+              </TouchableOpacity>
             </View>
 
             <View style={[styles.mainContent, { alignItems: isAr ? 'flex-end' : 'flex-start' }]}>
@@ -257,8 +267,11 @@ const styles = StyleSheet.create({
   
   topBar: { paddingHorizontal: 24, paddingTop: Platform.OS === 'ios' ? 10 : 40, justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   btPill: { backgroundColor: 'rgba(0, 217, 198, 0.15)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, alignItems: 'center', gap: 6, borderWidth: 1, borderColor: 'rgba(0, 217, 198, 0.3)' },
-  btDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.accent },
+ btDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: COLORS.accent },
   btText: { color: COLORS.accent, fontSize: 12, fontWeight: 'bold' },
+  
+  langButton: { backgroundColor: 'rgba(255,255,255,0.08)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, alignItems: 'center', gap: 6, borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
+  langText: { color: COLORS.textPrimary, fontSize: 12, fontWeight: 'bold' },
 
   mainContent: { paddingHorizontal: 24, flex: 1, justifyContent: 'flex-start' },
   
