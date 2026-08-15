@@ -110,19 +110,9 @@ export default function HomeScreen() {
       const lat = 30.2858;
       const lng = 31.7431;
       
-      // توجيه لجوجل مابس بوضعية "المشي"
-      const url = Platform.OS === 'ios'
-        ? `comgooglemaps://?saddr=&daddr=${lat},${lng}&directionsmode=walking`
-        : `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`;
-      
-      Linking.canOpenURL(url).then((supported) => {
-        if (supported) {
-          Linking.openURL(url);
-        } else {
-          // لو تطبيق جوجل مابس مش متسطب، يفتح المتصفح
-          Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`);
-        }
-      });
+      // توجيه مباشر لجوجل مابس (بيفتح التطبيق لو متسطب أو المتصفح لو لأ)
+      const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=walking`;
+      Linking.openURL(url).catch(() => {});
     } catch (e) {
       console.warn(e);
     }

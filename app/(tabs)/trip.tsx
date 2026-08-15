@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -14,6 +15,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_DEFAULT, Region } from 'react-native-maps';
@@ -515,9 +517,11 @@ export default function TripCostScreen() {
 
       {/* ── END TRIP MODAL ── */}
       <Modal visible={endModalVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHandle} />
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.modalOverlay}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={styles.modalContent}>
+                <View style={styles.modalHandle} />
             <Text style={[styles.modalTitle, { textAlign: isAr ? 'right' : 'left' }]}>
               {isAr ? 'ملخص وحساب الرحلة' : 'Trip Summary & Calculation'}
             </Text>
@@ -576,8 +580,10 @@ export default function TripCostScreen() {
               <Text style={styles.closeModalText}>{isAr ? 'إغلاق' : 'Close'}</Text>
             </TouchableOpacity>
 
+              </View>
+            </TouchableWithoutFeedback>
           </View>
-        </View>
+        </TouchableWithoutFeedback>
       </Modal>
 
     </SafeAreaView>
