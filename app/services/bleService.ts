@@ -483,59 +483,70 @@ export const getLiveData = async () => {
   }
 
   return {
-    rpm: rpm ?? 0,
-    coolant: coolant ?? 0,
+    rpm,
+    coolant,
     voltage: parseFloat(voltage.toFixed(1)),
-    engineLoad: engineLoad ?? 0,
+    engineLoad,
     maf: parseFloat(maf.toFixed(2)),
-    o2: o2 ?? 0,
-    fuelTrim: fuelTrim ?? 0,
+    o2,
+    fuelTrim,
   };
 };
 
-const requestPID = async (pid: string): Promise<number> => {
+const requestPID = async (pid: string): Promise<number | null> => {
   const response = await sendOBDCommand(pid);
+  const upperRaw = response.toUpperCase();
+  // أي رد فيه NO DATA / ERROR / UNABLE يبقى فشل صريح — لازم null مش صفر وهمي
+  if (
+    upperRaw.includes('NO DATA') ||
+    upperRaw.includes('ERROR') ||
+    upperRaw.includes('UNABLE') ||
+    upperRaw.includes('CAN ERROR') ||
+    upperRaw.includes('BUS INIT')
+  ) {
+    return null;
+  }
   const hex = response.replace(/\s/g, '').toUpperCase();
   // الـECU بيرد بـ (mode + 0x40) مش بنفس بايتات الطلب — مثلاً طلب '010C' يرجع رد يبدأ بـ '410C'
   const modeByte = parseInt(pid.substring(0, 2), 16);
   const responseMode = (modeByte + 0x40).toString(16).toUpperCase().padStart(2, '0');
   const expected = responseMode + pid.substring(2).toUpperCase();
   const idx = hex.indexOf(expected);
-  if (idx === -1) return 0;
+  if (idx === -1) return null;
   const data = hex.substring(idx + expected.length);
   const bytes = data.match(/.{1,2}/g) || [];
   const numbers = bytes.map(b => parseInt(b, 16));
 
   switch (pid) {
     case '010B': // MAP (Manifold Absolute Pressure) - kPa
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return numbers[0];
     case '010F': // IAT (Intake Air Temperature) - °C
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return numbers[0] - 40;
     case '0104': // Engine Load (%)
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return (numbers[0] * 100) / 255;
     case '010C':
-      if (numbers.length < 2) return 0;
+      if (numbers.length < 2) return null;
       return ((numbers[0] * 256) + numbers[1]) / 4;
     case '0105':
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return numbers[0] - 40;
     case '0142':
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return numbers[0] * 0.1;
     case '0110':
-      if (numbers.length < 2) return 0;
+      if (numbers.length < 2) return null;
       return ((numbers[0] * 256) + numbers[1]) / 100;
     case '0114':
-      if (numbers.length < 2) return 0;
+      if (numbers.length < 2) return null;
       return numbers[0] * 0.005;
     case '0106':
-      if (numbers.length < 1) return 0;
+      if (numbers.length < 1) return null;
       return (numbers[0] - 128) * 100 / 128;
     default:
-      return 0;
+      return null;
   }
 };
 
