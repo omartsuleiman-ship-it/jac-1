@@ -498,7 +498,11 @@ export const getDTCs = async (): Promise<{ code: string; module: string }[]> => 
   return allCodes;
 };
 
-export const getLiveData = async () => {
+export type LiveDataKey = 'rpm' | 'coolant' | 'voltage' | 'engineLoad' | 'maf' | 'o2' | 'fuelTrim';
+
+export const getLiveData = async (selectedKeys: LiveDataKey[]) => {
+  const want = (key: LiveDataKey) => selectedKeys.includes(key);
+
   const safeRequest = async (pid: string): Promise<number | null> => {
     try {
       return await requestPID(pid);
@@ -508,39 +512,46 @@ export const getLiveData = async () => {
     }
   };
 
-  // 1. Fetch Basic Engine Data
-  const rpm = await safeRequest('010C');
-  const coolant = await safeRequest('0105');
-  const o2 = await safeRequest('0114');
-  const fuelTrim = await safeRequest('0106');
-  const engineLoad = await safeRequest('0104');
+  // Only request PIDs the user actually selected — an unselected parameter
+  // sends ZERO OBD commands, which is the core fix for the bandwidth/JS-thread
+  // choke described in this request.
+  const rpm = want('rpm') ? await safeRequest('010C') : null;
+  const coolant = want('coolant') ? await safeRequest('0105') : null;
+  const o2 = want('o2') ? await safeRequest('0114') : null;
+  const fuelTrim = want('fuelTrim') ? await safeRequest('0106') : null;
+  const engineLoad = want('engineLoad') ? await safeRequest('0104') : null;
 
-  // 2. Direct Battery Voltage via ELM327 ATRV command
   let voltage = 0;
-  try {
-    const atrvResponse = await sendOBDCommand('ATRV');
-    // ATRV returns string like "14.1V"
-    const match = atrvResponse.match(/[\d.]+/);
-    if (match) voltage = parseFloat(match[0]);
-  } catch (e) {
-    console.warn('[BLE] ATRV failed', e);
+  if (want('voltage')) {
+    try {
+      const atrvResponse = await sendOBDCommand('ATRV');
+      const match = atrvResponse.match(/[\d.]+/);
+      if (match) voltage = parseFloat(match[0]);
+    } catch (e) {
+      console.warn('[BLE] ATRV failed', e);
+    }
   }
 
-  // 3. Virtual MAF (Speed-Density) for JAC S3 1.5L
+  // Virtual MAF depends on RPM/MAP/IAT internally to compute it, even if RPM
+  // itself isn't separately selected. These are still Mode 01 PIDs on the
+  // SAME already-active engine header (no ECU switch), so pulling them only
+  // when MAF is selected doesn't reintroduce the bandwidth problem — it's
+  // just the 3 PIDs this one derived value genuinely needs.
   let maf = 0;
-  const map = await safeRequest('010B'); // MAP in kPa
-  const iat = await safeRequest('010F'); // IAT in °C
+  if (want('maf')) {
+    const rpmForMaf = rpm !== null ? rpm : await safeRequest('010C');
+    const map = await safeRequest('010B');
+    const iat = await safeRequest('010F');
 
-  if (rpm !== null && map !== null && iat !== null && rpm > 0) {
-    const VE = 0.80; // Volumetric Efficiency (~80% average for 1.5L NA)
-    const ED = 1.499; // Engine Displacement in Liters (JAC S3)
-    const iatKelvin = iat + 273.15;
-    const gasConstant = 8.314; 
-    const airMolarMass = 28.97;
-    
-    // Speed-Density Formula to calculate MAF (g/s)
-    const imap = (rpm * map) / 120;
-    maf = imap * VE * ED * (airMolarMass / (gasConstant * iatKelvin));
+    if (rpmForMaf !== null && map !== null && iat !== null && rpmForMaf > 0) {
+      const VE = 0.80;
+      const ED = 1.499;
+      const iatKelvin = iat + 273.15;
+      const gasConstant = 8.314;
+      const airMolarMass = 28.97;
+      const imap = (rpmForMaf * map) / 120;
+      maf = imap * VE * ED * (airMolarMass / (gasConstant * iatKelvin));
+    }
   }
 
   return {
@@ -754,32 +765,52 @@ const parseTPMSResponse = (raw: string): TirePressures => {
   return EMPTY_TIRE_PRESSURES;
 };
 
-export const getExtraSafetyData = async () => {
+export type SafetyDataKey = 'atfTemp' | 'absPressure' | 'tirePressure';
+
+export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
   let atfTemp: number | null = null;
   let absPressure: number | null = null;
   let tirePressure: TirePressures = EMPTY_TIRE_PRESSURES;
 
-  // Note: these run sequentially in practice — the command queue serializes
-  // all BLE writes since ELM327 is half-duplex — but Promise.all lets us
-  // fire all three without one probe's rejection ever skipping the others.
-  const [atf, abs, tpms] = await Promise.all([
-    querySafetyECU('7E1', '222001', 'Transmission (ATF temp)'),
-    querySafetyECU('7B0', '22C001', 'ABS (brake pressure)'),
-    querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)'),
-  ]);
+  // CRITICAL: the probe list is built from ONLY what's selected. If none of
+  // these three keys are selected, `probes` stays empty, no ATSH header
+  // switch is ever sent for that ECU, and Promise.all resolves immediately —
+  // this is what eliminates the lag when Transmission/ABS/TPMS aren't being
+  // watched.
+  const probes: Promise<SafetyProbeResult & { key: SafetyDataKey }>[] = [];
 
-  // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
-  // format from the [BLE] raw response logs above — atf.raw / abs.raw hold it.
-  void atf;
-  void abs;
-
-  if (tpms.ok) {
-    tirePressure = parseTPMSResponse(tpms.raw);
+  if (selectedKeys.includes('atfTemp')) {
+    probes.push(
+      querySafetyECU('7E1', '222001', 'Transmission (ATF temp)').then((r) => ({ ...r, key: 'atfTemp' as const }))
+    );
+  }
+  if (selectedKeys.includes('absPressure')) {
+    probes.push(
+      querySafetyECU('7B0', '22C001', 'ABS (brake pressure)').then((r) => ({ ...r, key: 'absPressure' as const }))
+    );
+  }
+  if (selectedKeys.includes('tirePressure')) {
+    probes.push(
+      querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)').then((r) => ({ ...r, key: 'tirePressure' as const }))
+    );
   }
 
-  // ⚠️ Always return to the Engine ECU header, no matter what happened above,
-  // so getLiveData's RPM/coolant/etc. polling never hangs on a stale header
-  await sendOBDCommand('ATSH7E0', 500).catch(() => {});
+  const results = await Promise.all(probes);
+
+  for (const result of results) {
+    // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
+    // format from the [BLE] raw response logs — result.raw holds it.
+    if (result.key === 'tirePressure' && result.ok) {
+      tirePressure = parseTPMSResponse(result.raw);
+    }
+  }
+
+  // Only reset the header if we actually switched away from it — if nothing
+  // in `probes` ran (all three deselected), no ATSH was ever sent, so skip
+  // this too rather than sending a pointless extra command every cycle.
+  if (probes.length > 0) {
+    await sendOBDCommand('ATSH7E0', 500).catch(() => {});
+  }
 
   return { atfTemp, absPressure, tirePressure };
 };

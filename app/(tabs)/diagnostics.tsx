@@ -6,22 +6,30 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  LayoutAnimation,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
+  UIManager,
   View
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected, TirePressures } from '../services/bleService';
+import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected, LiveDataKey, SafetyDataKey, TirePressures } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+// Android needs this opt-in for LayoutAnimation to work at all (iOS doesn't)
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
 // -----------------------------------------------------------------------------
 // Constants & Types
@@ -126,6 +134,35 @@ const getTirePressureStatus = (pressure: number | null): CardStatus => {
 };
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// Selective Live Data — parameter catalogue for the pick-and-choose dashboard
+// -----------------------------------------------------------------------------
+type LiveParamId = LiveDataKey | SafetyDataKey;
+
+type LiveParamMeta = {
+  id: LiveParamId;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  labelEn: string;
+  labelAr: string;
+  category: 'engine' | 'safety';
+};
+
+const LIVE_PARAMS: LiveParamMeta[] = [
+  { id: 'rpm', icon: 'speedometer-outline', labelEn: 'Engine RPM', labelAr: 'سرعة دوران المحرك', category: 'engine' },
+  { id: 'coolant', icon: 'thermometer-outline', labelEn: 'Coolant Temp', labelAr: 'حرارة المحرك', category: 'engine' },
+  { id: 'voltage', icon: 'battery-charging-outline', labelEn: 'Battery Volt', labelAr: 'جهد البطارية', category: 'engine' },
+  { id: 'engineLoad', icon: 'speedometer', labelEn: 'Engine Load', labelAr: 'حمل المحرك', category: 'engine' },
+  { id: 'maf', icon: 'flash-outline', labelEn: 'MAF Flow', labelAr: 'تدفق الهواء', category: 'engine' },
+  { id: 'o2', icon: 'analytics-outline', labelEn: 'O2 Sensor', labelAr: 'الأكسجين', category: 'engine' },
+  { id: 'fuelTrim', icon: 'options-outline', labelEn: 'Fuel Trim', labelAr: 'ضبط الوقود', category: 'engine' },
+  { id: 'atfTemp', icon: 'cog-outline', labelEn: 'Trans Temp', labelAr: 'حرارة الفتيس', category: 'safety' },
+  { id: 'absPressure', icon: 'disc-outline', labelEn: 'Brake Press', labelAr: 'ضغط الفرامل', category: 'safety' },
+  { id: 'tirePressure', icon: 'radio-button-on-outline', labelEn: 'Tire Pressure', labelAr: 'ضغط الكاوتش', category: 'safety' },
+];
+
+const DEFAULT_SELECTED_PARAMS: LiveParamId[] = ['rpm', 'coolant', 'voltage'];
+const STORAGE_KEY_SELECTED_PARAMS = '@car_app/selected_live_params_v1';
+
 type ViewMode = 'SCANNER' | 'LIVE_DATA' | 'READINESS';
 
 type FaultStatus = 'ready' | 'loading' | 'error';
@@ -187,6 +224,53 @@ export default function DiagnosticsScreen() {
   });
 
   const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
+
+  // --- Selective Live Data Dashboard state ---
+  const [liveDataMode, setLiveDataMode] = useState<'select' | 'dashboard'>('select');
+  const [selectedParams, setSelectedParams] = useState<Set<LiveParamId>>(new Set(DEFAULT_SELECTED_PARAMS));
+
+  // Restore the user's last selection on mount; jump straight to the
+  // dashboard if one was already saved instead of always starting on select
+  useEffect(() => {
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem(STORAGE_KEY_SELECTED_PARAMS);
+        if (stored) {
+          const ids: LiveParamId[] = JSON.parse(stored);
+          if (ids.length > 0) {
+            setSelectedParams(new Set(ids));
+            setLiveDataMode('dashboard');
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to load selected live params:', error);
+      }
+    })();
+  }, []);
+
+  const toggleParam = (id: LiveParamId) => {
+    setSelectedParams((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const confirmParamSelection = async () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setLiveDataMode('dashboard');
+    try {
+      await AsyncStorage.setItem(STORAGE_KEY_SELECTED_PARAMS, JSON.stringify(Array.from(selectedParams)));
+    } catch (error) {
+      console.warn('Failed to save selected live params:', error);
+    }
+  };
+
+  const openParamSelection = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setLiveDataMode('select');
+  };
 
   // --- READINESS state ---
   const [readiness, setReadiness] = useState<{
@@ -264,25 +348,31 @@ export default function DiagnosticsScreen() {
   // Live Data & Multi-ECU Polling
   // ---------------------------------------------------------------------------
   const fetchLiveDataWrapper = useCallback(async (isInitial = false) => {
+    const engineKeys = LIVE_PARAMS.filter((p) => p.category === 'engine' && selectedParams.has(p.id)).map((p) => p.id) as LiveDataKey[];
+    if (engineKeys.length === 0) return; // nothing engine-side selected — skip the round trip entirely
+
     if (isInitial) setIsLiveDataLoading(true);
     try {
-      const data = await getLiveData();
+      const data = await getLiveData(engineKeys);
       setLiveData(data);
     } catch (error) {
       console.warn('Failed to fetch live data:', error);
     } finally {
       if (isInitial) setIsLiveDataLoading(false);
     }
-  }, []);
+  }, [selectedParams]);
 
   const fetchExtraSafetyWrapper = useCallback(async () => {
+    const safetyKeys = LIVE_PARAMS.filter((p) => p.category === 'safety' && selectedParams.has(p.id)).map((p) => p.id) as SafetyDataKey[];
+    if (safetyKeys.length === 0) return; // nothing multi-ECU selected — skip entirely, no ATSH switching at all
+
     try {
-      const data = await getExtraSafetyData();
+      const data = await getExtraSafetyData(safetyKeys);
       setExtraSafetyData(data);
     } catch (error) {
       console.warn('Failed to fetch extra safety data:', error);
     }
-  }, []);
+  }, [selectedParams]);
 
   // Poll live data with a single sequential loop instead of two independent
   // setIntervals. This guarantees the slow (multi-ECU header-switching) request
@@ -325,7 +415,7 @@ export default function DiagnosticsScreen() {
       pollTimeout = setTimeout(tick, FAST_INTERVAL_MS);
     };
 
-    if (activeView === 'LIVE_DATA') {
+    if (activeView === 'LIVE_DATA' && liveDataMode === 'dashboard' && selectedParams.size > 0) {
       runPollLoop();
     }
 
@@ -333,7 +423,7 @@ export default function DiagnosticsScreen() {
       cancelled = true;
       if (pollTimeout) clearTimeout(pollTimeout);
     };
-  }, [activeView, fetchLiveDataWrapper, fetchExtraSafetyWrapper]);
+  }, [activeView, liveDataMode, selectedParams, fetchLiveDataWrapper, fetchExtraSafetyWrapper]);
 
   // Smooth Animation Trigger — animate toward 0 on a null/lost reading too
   // (instead of an instant setValue snap), so one missed poll doesn't jolt
@@ -502,175 +592,262 @@ export default function DiagnosticsScreen() {
         )}
 
         {activeView === 'LIVE_DATA' && (
-          <View style={styles.liveGrid}>
-            {/* ── 3D Interactive RPM Gauge (Engine) ── */}
-            <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
-              <View style={{ width: '100%', flexDirection: dir, justifyContent: 'space-between', position: 'absolute', top: 16, paddingHorizontal: 16 }}>
-                <View style={[styles.statusBadge, { backgroundColor: actualRpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(actualRpm).tone), flexDirection: dir }]}>
-                  <View style={[styles.miniDot, { backgroundColor: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]} />
-                  <Text style={[styles.statusBadgeText, { color: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]}>
-                    {actualRpm === null ? (isAr ? 'بانتظار...' : 'Waiting...') : isAr ? getRpmStatus(actualRpm).statusAr : getRpmStatus(actualRpm).statusEn}
+          <View>
+            {/* ── Select / Dashboard toolbar ── */}
+            <View style={[styles.liveModeBar, { flexDirection: dir }]}>
+              {liveDataMode === 'dashboard' ? (
+                <>
+                  <TouchableOpacity onPress={openParamSelection} style={[styles.liveModeBtn, { flexDirection: dir }]} activeOpacity={0.8}>
+                    <Ionicons name="options-outline" size={16} color={COLORS.accent} />
+                    <Text style={styles.liveModeBtnText}>{isAr ? 'تعديل الاختيار' : 'Edit Selection'}</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.liveModeCount}>
+                    {isAr ? `${selectedParams.size} مقياس نشط` : `${selectedParams.size} active`}
                   </Text>
-                </View>
-                <Ionicons name="speedometer-outline" size={20} color={COLORS.textTertiary} />
-              </View>
-
-              <View style={{ width: 220, height: 110, marginTop: 20, alignItems: 'center', justifyContent: 'flex-end' }}>
-                <Svg width="100%" height="100%" viewBox="0 0 200 100">
-                  <Path d="M 20 90 A 80 80 0 0 1 180 90" fill="none" stroke={COLORS.cardBorder} strokeWidth="12" strokeLinecap="round" />
-                  <AnimatedPath
-                    d="M 20 90 A 80 80 0 0 1 180 90"
-                    fill="none"
-                    stroke={actualRpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(actualRpm).tone)}
-                    strokeWidth="12"
-                    strokeLinecap="round"
-                    strokeDasharray={251.2}
-                    strokeDashoffset={rpmAnim.interpolate({
-                      inputRange: [0, 6000],
-                      outputRange: [251.2, 0],
-                      extrapolate: 'clamp',
-                    })}
-                  />
-                </Svg>
-                
-                <View style={{ position: 'absolute', bottom: 0, alignItems: 'center' }}>
-                  {isLiveDataLoading && actualRpm === null ? (
-                    <ActivityIndicator color={COLORS.accent} style={{ marginBottom: 10 }} />
-                  ) : (
-                    <>
-                      <Text style={{ color: COLORS.textPrimary, fontSize: 42, fontWeight: '900', letterSpacing: -1, height: 48 }}>
-                        {actualRpm !== null ? actualRpm.toFixed(0) : '--'}
-                      </Text>
-                      <Text style={{ color: COLORS.textSecondary, fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>RPM</Text>
-                    </>
-                  )}
-                </View>
-              </View>
-              <Text style={{ color: COLORS.textSecondary, fontSize: 14, fontWeight: '600', marginTop: 12 }}>
-                {isAr ? 'سرعة دوران المحرك' : 'Engine Speed'}
-              </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.liveModeCount}>
+                    {isAr ? `${selectedParams.size} تم اختياره` : `${selectedParams.size} selected`}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={confirmParamSelection}
+                    disabled={selectedParams.size === 0}
+                    style={[styles.liveModeBtn, styles.liveModeBtnConfirm, selectedParams.size === 0 && { opacity: 0.4 }, { flexDirection: dir }]}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="checkmark-circle" size={16} color="#0B0D10" />
+                    <Text style={styles.liveModeBtnConfirmText}>{isAr ? 'تأكيد' : 'Confirm'}</Text>
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
 
-            {/* ── Multi-ECU Safety Cards ── */}
-            <LiveCard
-              icon="cog-outline"
-              tone={getAtfTempStatus(actualAtfTemp).tone}
-              value={actualAtfTemp !== null ? actualAtfTemp.toFixed(0) : '--'}
-              unit="°C"
-              labelEn="Trans Temp"
-              labelAr="حرارة الفتيس"
-              statusEn={getAtfTempStatus(actualAtfTemp).statusEn}
-              statusAr={getAtfTempStatus(actualAtfTemp).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualAtfTemp === null}
-            />
-            <LiveCard
-              icon="disc-outline"
-              tone={getAbsPressureStatus(actualAbsPressure).tone}
-              value={actualAbsPressure !== null ? actualAbsPressure.toFixed(1) : '--'}
-              unit="bar"
-              labelEn="Brake Press"
-              labelAr="ضغط الفرامل"
-              statusEn={getAbsPressureStatus(actualAbsPressure).statusEn}
-              statusAr={getAbsPressureStatus(actualAbsPressure).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualAbsPressure === null}
-            />
-            <TPMSCard
-              tirePressure={actualTirePressure}
-              isAr={isAr}
-              isLoading={isLiveDataLoading}
-            />
+            {liveDataMode === 'select' ? (
+              /* ── SELECT MODE: plain list with checkboxes ── */
+              <View style={styles.paramSelectList}>
+                {LIVE_PARAMS.map((param) => {
+                  const checked = selectedParams.has(param.id);
+                  return (
+                    <TouchableOpacity
+                      key={param.id}
+                      style={[styles.paramSelectRow, { flexDirection: dir }, checked && styles.paramSelectRowActive]}
+                      onPress={() => toggleParam(param.id)}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.paramSelectIconWrap, checked && { backgroundColor: COLORS.accentDim }]}>
+                        <Ionicons name={param.icon} size={18} color={checked ? COLORS.accent : COLORS.textTertiary} />
+                      </View>
+                      <Text style={[styles.paramSelectLabel, { textAlign: isAr ? 'right' : 'left' }]}>
+                        {isAr ? param.labelAr : param.labelEn}
+                      </Text>
+                      <Ionicons
+                        name={checked ? 'checkbox' : 'square-outline'}
+                        size={22}
+                        color={checked ? COLORS.accent : COLORS.textTertiary}
+                      />
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : (
+              /* ── DASHBOARD MODE: only the selected cards ── */
+              <View style={styles.liveGrid}>
+                {selectedParams.has('rpm') && (
+                  <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
+                    <View style={{ width: '100%', flexDirection: dir, justifyContent: 'space-between', position: 'absolute', top: 16, paddingHorizontal: 16 }}>
+                      <View style={[styles.statusBadge, { backgroundColor: actualRpm === null ? 'rgba(255,255,255,0.06)' : urgencyDim(getRpmStatus(actualRpm).tone), flexDirection: dir }]}>
+                        <View style={[styles.miniDot, { backgroundColor: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]} />
+                        <Text style={[styles.statusBadgeText, { color: actualRpm === null ? COLORS.textTertiary : urgencyColor(getRpmStatus(actualRpm).tone) }]}>
+                          {actualRpm === null ? (isAr ? 'بانتظار...' : 'Waiting...') : isAr ? getRpmStatus(actualRpm).statusAr : getRpmStatus(actualRpm).statusEn}
+                        </Text>
+                      </View>
+                      <Ionicons name="speedometer-outline" size={20} color={COLORS.textTertiary} />
+                    </View>
 
-            {/* ── Standard Engine Cards ── */}
-            <LiveCard
-              icon="thermometer-outline"
-              tone={getCoolantStatus(actualCoolant).tone}
-              value={actualCoolant !== null ? actualCoolant.toFixed(0) : '--'}
-              unit="°C"
-              labelEn="Coolant Temp"
-              labelAr="حرارة المحرك"
-              statusEn={getCoolantStatus(actualCoolant).statusEn}
-              statusAr={getCoolantStatus(actualCoolant).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualCoolant === null}
-            />
-            <LiveCard
-              icon="battery-charging-outline"
-              tone={getVoltageStatus(actualVoltage).tone}
-              value={actualVoltage !== null ? actualVoltage.toFixed(1) : '--'}
-              unit="V"
-              labelEn="Battery Volt"
-              labelAr="جهد البطارية"
-              statusEn={getVoltageStatus(actualVoltage).statusEn}
-              statusAr={getVoltageStatus(actualVoltage).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualVoltage === null}
-            />
-            <LiveCard
-              icon="speedometer"
-              tone={getEngineLoadStatus(actualEngineLoad).tone}
-              value={actualEngineLoad !== null ? actualEngineLoad.toFixed(1) : '--'}
-              unit="%"
-              labelEn="Engine Load"
-              labelAr="حمل المحرك"
-              statusEn={getEngineLoadStatus(actualEngineLoad).statusEn}
-              statusAr={getEngineLoadStatus(actualEngineLoad).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualEngineLoad === null}
-            />
-            <LiveCard
-              icon="flash-outline"
-              tone={getMafStatus(actualMaf).tone}
-              value={actualMaf !== null ? actualMaf.toFixed(1) : '--'}
-              unit="g/s"
-              labelEn="MAF Flow"
-              labelAr="تدفق الهواء"
-              statusEn={getMafStatus(actualMaf).statusEn}
-              statusAr={getMafStatus(actualMaf).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualMaf === null}
-            />
-            <LiveCard
-              icon="analytics-outline"
-              tone={getO2Status(actualO2).tone}
-              value={actualO2 !== null ? actualO2.toFixed(2) : '--'}
-              unit="V"
-              labelEn="O2 Sensor"
-              labelAr="الأكسجين"
-              statusEn={getO2Status(actualO2).statusEn}
-              statusAr={getO2Status(actualO2).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualO2 === null}
-            />
-            <LiveCard
-              icon="options-outline"
-              tone={getFuelTrimStatus(actualFuelTrim).tone}
-              value={actualFuelTrim !== null ? actualFuelTrim.toFixed(1) : '--'}
-              unit="%"
-              labelEn="Fuel Trim"
-              labelAr="ضبط الوقود"
-              statusEn={getFuelTrimStatus(actualFuelTrim).statusEn}
-              statusAr={getFuelTrimStatus(actualFuelTrim).statusAr}
-              isAr={isAr}
-              dir={dir}
-              isLoading={isLiveDataLoading}
-              isWaiting={actualFuelTrim === null}
-            />
+                    <View style={{ width: 220, height: 110, marginTop: 20, alignItems: 'center', justifyContent: 'flex-end' }}>
+                      <Svg width="100%" height="100%" viewBox="0 0 200 100">
+                        <Path d="M 20 90 A 80 80 0 0 1 180 90" fill="none" stroke={COLORS.cardBorder} strokeWidth="12" strokeLinecap="round" />
+                        <AnimatedPath
+                          d="M 20 90 A 80 80 0 0 1 180 90"
+                          fill="none"
+                          stroke={actualRpm === null ? COLORS.cardBorder : urgencyColor(getRpmStatus(actualRpm).tone)}
+                          strokeWidth="12"
+                          strokeLinecap="round"
+                          strokeDasharray={251.2}
+                          strokeDashoffset={rpmAnim.interpolate({
+                            inputRange: [0, 6000],
+                            outputRange: [251.2, 0],
+                            extrapolate: 'clamp',
+                          })}
+                        />
+                      </Svg>
+
+                      <View style={{ position: 'absolute', bottom: 0, alignItems: 'center' }}>
+                        {isLiveDataLoading && actualRpm === null ? (
+                          <ActivityIndicator color={COLORS.accent} style={{ marginBottom: 10 }} />
+                        ) : (
+                          <>
+                            <Text style={{ color: COLORS.textPrimary, fontSize: 42, fontWeight: '900', letterSpacing: -1, height: 48 }}>
+                              {actualRpm !== null ? actualRpm.toFixed(0) : '--'}
+                            </Text>
+                            <Text style={{ color: COLORS.textSecondary, fontSize: 13, fontWeight: '700', letterSpacing: 1 }}>RPM</Text>
+                          </>
+                        )}
+                      </View>
+                    </View>
+                    <Text style={{ color: COLORS.textSecondary, fontSize: 14, fontWeight: '600', marginTop: 12 }}>
+                      {isAr ? 'سرعة دوران المحرك' : 'Engine Speed'}
+                    </Text>
+                  </View>
+                )}
+
+                {selectedParams.has('atfTemp') && (
+                  <LiveCard
+                    icon="cog-outline"
+                    tone={getAtfTempStatus(actualAtfTemp).tone}
+                    value={actualAtfTemp !== null ? actualAtfTemp.toFixed(0) : '--'}
+                    unit="°C"
+                    labelEn="Trans Temp"
+                    labelAr="حرارة الفتيس"
+                    statusEn={getAtfTempStatus(actualAtfTemp).statusEn}
+                    statusAr={getAtfTempStatus(actualAtfTemp).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualAtfTemp === null}
+                  />
+                )}
+                {selectedParams.has('absPressure') && (
+                  <LiveCard
+                    icon="disc-outline"
+                    tone={getAbsPressureStatus(actualAbsPressure).tone}
+                    value={actualAbsPressure !== null ? actualAbsPressure.toFixed(1) : '--'}
+                    unit="bar"
+                    labelEn="Brake Press"
+                    labelAr="ضغط الفرامل"
+                    statusEn={getAbsPressureStatus(actualAbsPressure).statusEn}
+                    statusAr={getAbsPressureStatus(actualAbsPressure).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualAbsPressure === null}
+                  />
+                )}
+                {selectedParams.has('tirePressure') && (
+                  <TPMSCard
+                    tirePressure={actualTirePressure}
+                    isAr={isAr}
+                    isLoading={isLiveDataLoading}
+                  />
+                )}
+                {selectedParams.has('coolant') && (
+                  <LiveCard
+                    icon="thermometer-outline"
+                    tone={getCoolantStatus(actualCoolant).tone}
+                    value={actualCoolant !== null ? actualCoolant.toFixed(0) : '--'}
+                    unit="°C"
+                    labelEn="Coolant Temp"
+                    labelAr="حرارة المحرك"
+                    statusEn={getCoolantStatus(actualCoolant).statusEn}
+                    statusAr={getCoolantStatus(actualCoolant).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualCoolant === null}
+                  />
+                )}
+                {selectedParams.has('voltage') && (
+                  <LiveCard
+                    icon="battery-charging-outline"
+                    tone={getVoltageStatus(actualVoltage).tone}
+                    value={actualVoltage !== null ? actualVoltage.toFixed(1) : '--'}
+                    unit="V"
+                    labelEn="Battery Volt"
+                    labelAr="جهد البطارية"
+                    statusEn={getVoltageStatus(actualVoltage).statusEn}
+                    statusAr={getVoltageStatus(actualVoltage).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualVoltage === null}
+                  />
+                )}
+                {selectedParams.has('engineLoad') && (
+                  <LiveCard
+                    icon="speedometer"
+                    tone={getEngineLoadStatus(actualEngineLoad).tone}
+                    value={actualEngineLoad !== null ? actualEngineLoad.toFixed(1) : '--'}
+                    unit="%"
+                    labelEn="Engine Load"
+                    labelAr="حمل المحرك"
+                    statusEn={getEngineLoadStatus(actualEngineLoad).statusEn}
+                    statusAr={getEngineLoadStatus(actualEngineLoad).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualEngineLoad === null}
+                  />
+                )}
+                {selectedParams.has('maf') && (
+                  <LiveCard
+                    icon="flash-outline"
+                    tone={getMafStatus(actualMaf).tone}
+                    value={actualMaf !== null ? actualMaf.toFixed(1) : '--'}
+                    unit="g/s"
+                    labelEn="MAF Flow"
+                    labelAr="تدفق الهواء"
+                    statusEn={getMafStatus(actualMaf).statusEn}
+                    statusAr={getMafStatus(actualMaf).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualMaf === null}
+                  />
+                )}
+                {selectedParams.has('o2') && (
+                  <LiveCard
+                    icon="analytics-outline"
+                    tone={getO2Status(actualO2).tone}
+                    value={actualO2 !== null ? actualO2.toFixed(2) : '--'}
+                    unit="V"
+                    labelEn="O2 Sensor"
+                    labelAr="الأكسجين"
+                    statusEn={getO2Status(actualO2).statusEn}
+                    statusAr={getO2Status(actualO2).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualO2 === null}
+                  />
+                )}
+                {selectedParams.has('fuelTrim') && (
+                  <LiveCard
+                    icon="options-outline"
+                    tone={getFuelTrimStatus(actualFuelTrim).tone}
+                    value={actualFuelTrim !== null ? actualFuelTrim.toFixed(1) : '--'}
+                    unit="%"
+                    labelEn="Fuel Trim"
+                    labelAr="ضبط الوقود"
+                    statusEn={getFuelTrimStatus(actualFuelTrim).statusEn}
+                    statusAr={getFuelTrimStatus(actualFuelTrim).statusAr}
+                    isAr={isAr}
+                    dir={dir}
+                    isLoading={isLiveDataLoading}
+                    isWaiting={actualFuelTrim === null}
+                  />
+                )}
+
+                {selectedParams.size === 0 && (
+                  <View style={styles.emptyState}>
+                    <Ionicons name="options-outline" size={36} color={COLORS.textTertiary} />
+                    <Text style={styles.emptyStateText}>
+                      {isAr ? 'محتاج تختار مقياس واحد على الأقل' : 'Select at least one parameter'}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            )}
           </View>
         )}
 
@@ -1336,6 +1513,35 @@ const styles = StyleSheet.create({
   aiDisclaimerText: { flex: 1, color: COLORS.textSecondary, fontSize: 12, lineHeight: 17 },
 
   liveGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+
+  liveModeBar: { justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
+  liveModeBtn: { alignItems: 'center', gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: COLORS.accentDim },
+  liveModeBtnText: { color: COLORS.accent, fontSize: 13, fontWeight: '700' },
+  liveModeCount: { color: COLORS.textTertiary, fontSize: 12, fontWeight: '600' },
+  liveModeBtnConfirm: { backgroundColor: COLORS.accent },
+  liveModeBtnConfirmText: { color: '#0B0D10', fontSize: 13, fontWeight: '800' },
+
+  paramSelectList: { gap: 8 },
+  paramSelectRow: {
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  paramSelectRowActive: { borderColor: COLORS.accent },
+  paramSelectIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.cardAlt,
+  },
+  paramSelectLabel: { flex: 1, color: COLORS.textPrimary, fontSize: 14.5, fontWeight: '700' },
   liveCard: {
     width: '48%',
     backgroundColor: COLORS.card,
