@@ -1,8 +1,8 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
-import { router } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   ImageBackground,
@@ -29,13 +29,42 @@ const COLORS = {
   danger: '#FF6B5E',
 };
 
+// ── Must match STORAGE_KEY_RECORDS / STORAGE_KEY_ODOMETER in maintenance.tsx exactly ──
+const STORAGE_KEY_MAINTENANCE_RECORDS = '@car_app/maintenance_records_v1';
+const STORAGE_KEY_MAINTENANCE_ODOMETER = '@car_app/current_odometer_v1';
+
+// ── Must match MAINTENANCE_CONFIG ids/labels/units in maintenance.tsx exactly.
+// Only id/label/unit are duplicated here (not the lifespan `options`), since
+// those aren't needed for the "nearest service" calculation below. ──
+const MAINTENANCE_ITEM_META: Record<string, { labelEn: string; labelAr: string; unit: 'km' | 'months' }> = {
+  engine_oil: { labelEn: 'Engine Oil', labelAr: 'زيت المحرك', unit: 'km' },
+  transmission_fluid: { labelEn: 'Transmission Fluid', labelAr: 'زيت الفتيس', unit: 'km' },
+  timing_belt: { labelEn: 'Timing Belt', labelAr: 'سير الكاتينة', unit: 'km' },
+  spark_plugs: { labelEn: 'Spark Plugs', labelAr: 'بوجيهات', unit: 'km' },
+  filters: { labelEn: 'Filters (Air/AC)', labelAr: 'فلاتر (هواء/تكييف)', unit: 'km' },
+  brake_pads: { labelEn: 'Brake Pads', labelAr: 'تيل الفرامل', unit: 'km' },
+  battery: { labelEn: 'Battery', labelAr: 'البطارية', unit: 'months' },
+};
+
 export default function HomeScreen() {
   const { isAr, toggleLanguage } = useLang();
   const [greeting, setGreeting] = useState('');
   
-  // ── Live Trip State ──
+ // ── Live Trip State ──
   const [isTripActive, setIsTripActive] = useState(false);
   const [liveTripCost, setLiveTripCost] = useState('0.00');
+
+  // ── Dashboard Widgets State ──
+  const [vehicleHealth, setVehicleHealth] = useState<{ ok: boolean; faultCount: number }>({ ok: true, faultCount: 0 });
+  const [ecoScore, setEcoScore] = useState<number | null>(null);
+  const [nextService, setNextService] = useState<{
+    itemId: string;
+    labelEn: string;
+    labelAr: string;
+    remainingKm: number;
+    percentRemaining: number;
+    overdue: boolean;
+  } | null>(null);
 
   useEffect(() => {
     const currentHour = new Date().getHours();
@@ -68,6 +97,88 @@ export default function HomeScreen() {
     const interval = setInterval(pollTripData, 2000);
     return () => clearInterval(interval);
   }, []);
+
+  // ── Refresh dashboard widgets from real AsyncStorage data every time the tab is focused ──
+  const refreshDashboardData = useCallback(async () => {
+    // Vehicle Health — written by diagnostics.tsx on every scan
+    try {
+      const storedFaults = await AsyncStorage.getItem('@stored_faults');
+      const faults = storedFaults ? JSON.parse(storedFaults) : [];
+      const faultCount = Array.isArray(faults) ? faults.length : 0;
+      setVehicleHealth({ ok: faultCount === 0, faultCount });
+    } catch (error) {
+      console.warn('Failed to load vehicle health:', error);
+    }
+
+    // Eco Score — average of ecoScore across recent trips (trip.tsx). Older
+    // trips saved before ecoScore existed won't have the field — those are
+    // filtered out rather than treated as 0, so they don't drag the average
+    // down unfairly.
+    try {
+      const storedTrips = await AsyncStorage.getItem('@recent_trips');
+      const trips: { ecoScore?: number }[] = storedTrips ? JSON.parse(storedTrips) : [];
+      const scored = trips.filter((t): t is { ecoScore: number } => typeof t.ecoScore === 'number');
+      if (scored.length > 0) {
+        const avg = scored.reduce((sum, t) => sum + t.ecoScore, 0) / scored.length;
+        setEcoScore(Math.round(avg));
+      } else {
+        setEcoScore(null);
+      }
+    } catch (error) {
+      console.warn('Failed to load eco score:', error);
+    }
+
+    // Next Service — nearest upcoming km-based item across all logged records (maintenance.tsx)
+    try {
+      const [storedRecords, storedOdometer] = await Promise.all([
+        AsyncStorage.getItem(STORAGE_KEY_MAINTENANCE_RECORDS),
+        AsyncStorage.getItem(STORAGE_KEY_MAINTENANCE_ODOMETER),
+      ]);
+      const records: Record<string, { itemId: string; lifespanValue: number; loggedAtOdometer: number }> =
+        storedRecords ? JSON.parse(storedRecords) : {};
+      const currentOdometer: number = storedOdometer ? JSON.parse(storedOdometer) : 0;
+
+      type NearestServiceCandidate = { itemId: string; remainingKm: number; percentRemaining: number; overdue: boolean };
+      let nearest: NearestServiceCandidate | null = null;
+
+      // for...of, NOT .forEach() — .forEach's callback is a separate closure,
+      // and TypeScript can't track a `let` reassignment made inside it back
+      // in the outer scope, which is exactly what caused the 'never' errors
+      // above. A plain loop keeps everything in one flow-analyzable scope.
+      for (const record of Object.values(records)) {
+        const meta = MAINTENANCE_ITEM_META[record.itemId];
+        if (!meta || meta.unit !== 'km') continue; // only km-based items feed this widget (e.g. not Battery)
+        const consumed = currentOdometer - record.loggedAtOdometer;
+        const remaining = record.lifespanValue - consumed;
+        const percentRemaining = Math.min(100, Math.max(0, (remaining / record.lifespanValue) * 100));
+        if (nearest === null || remaining < nearest.remainingKm) {
+          nearest = { itemId: record.itemId, remainingKm: remaining, percentRemaining, overdue: remaining <= 0 };
+        }
+      }
+
+      if (nearest) {
+        const meta = MAINTENANCE_ITEM_META[nearest.itemId];
+        setNextService({
+          itemId: nearest.itemId,
+          labelEn: meta.labelEn,
+          labelAr: meta.labelAr,
+          remainingKm: nearest.remainingKm,
+          percentRemaining: nearest.percentRemaining,
+          overdue: nearest.overdue,
+        });
+      } else {
+        setNextService(null);
+      }
+    } catch (error) {
+      console.warn('Failed to load next service:', error);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshDashboardData();
+    }, [refreshDashboardData])
+  );
 
   // ── Single Tap Vault Handler ──
   const handleUnlockTrips = async () => {
@@ -189,12 +300,16 @@ export default function HomeScreen() {
                 
                 {/* Health Pill */}
                 <View style={[styles.widgetFull, styles.healthWidget, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
-                  <View style={[styles.healthIconWrap, { backgroundColor: 'rgba(0, 230, 118, 0.15)' }]}>
-                    <Ionicons name="shield-checkmark" size={20} color={COLORS.success} />
+                  <View style={[styles.healthIconWrap, { backgroundColor: vehicleHealth.ok ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 107, 94, 0.15)' }]}>
+                    <Ionicons name={vehicleHealth.ok ? 'shield-checkmark' : 'warning'} size={20} color={vehicleHealth.ok ? COLORS.success : COLORS.danger} />
                   </View>
                   <View style={{ flex: 1, alignItems: isAr ? 'flex-end' : 'flex-start' }}>
                     <Text style={styles.widgetTitle}>{isAr ? 'حالة السيارة' : 'Vehicle Health'}</Text>
-                    <Text style={[styles.widgetValue, { color: COLORS.success }]}>{isAr ? 'جميع الأنظمة سليمة' : 'All Systems Go'}</Text>
+                    <Text style={[styles.widgetValue, { color: vehicleHealth.ok ? COLORS.success : COLORS.danger }]}>
+                      {vehicleHealth.ok
+                        ? (isAr ? 'جميع الأنظمة سليمة' : 'All Systems Go')
+                        : (isAr ? `${vehicleHealth.faultCount} عطل مكتشف` : `${vehicleHealth.faultCount} Fault${vehicleHealth.faultCount === 1 ? '' : 's'} Detected`)}
+                    </Text>
                   </View>
                 </View>
 
@@ -216,7 +331,9 @@ export default function HomeScreen() {
                   <View style={[styles.widgetHalf, { alignItems: isAr ? 'flex-end' : 'flex-start' }]}>
                     <Ionicons name="leaf-outline" size={22} color={COLORS.success} style={{ marginBottom: 6 }} />
                     <Text style={styles.widgetTitle}>{isAr ? 'قيادة موفرة' : 'Eco Score'}</Text>
-                    <Text style={styles.widgetValue}>96<Text style={styles.widgetUnit}>/100</Text></Text>
+                    <Text style={styles.widgetValue}>
+                      {ecoScore !== null ? ecoScore : '--'}<Text style={styles.widgetUnit}>/100</Text>
+                    </Text>
                   </View>
 
                   {/* Last Parked (Now a Button with Face ID) */}
@@ -236,14 +353,30 @@ export default function HomeScreen() {
                 {/* Maintenance Progress */}
                 <View style={[styles.widgetFull, { alignItems: isAr ? 'flex-end' : 'flex-start' }]}>
                   <View style={[styles.maintenanceHeader, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
-                    <Ionicons name="build-outline" size={16} color={COLORS.warning} />
-                    <Text style={styles.widgetTitle}>{isAr ? 'الصيانة القادمة (150 ألف)' : 'Next Service (150k)'}</Text>
+                    <Ionicons name="build-outline" size={16} color={nextService?.overdue ? COLORS.danger : COLORS.warning} />
+                    <Text style={styles.widgetTitle}>
+                      {nextService
+                        ? (isAr ? `الصيانة القادمة (${nextService.labelAr})` : `Next Service (${nextService.labelEn})`)
+                        : (isAr ? 'الصيانة القادمة' : 'Next Service')}
+                    </Text>
                   </View>
                   <Text style={[styles.widgetValue, { fontSize: 15, marginBottom: 8 }]}>
-                    {isAr ? 'باقي ٤,٥٠٠ كم' : '4,500 km remaining'}
+                    {nextService
+                      ? nextService.overdue
+                        ? (isAr ? `متأخر بـ ${Math.abs(Math.round(nextService.remainingKm)).toLocaleString()} كم` : `Overdue by ${Math.abs(Math.round(nextService.remainingKm)).toLocaleString()} km`)
+                        : (isAr ? `باقي ${Math.round(nextService.remainingKm).toLocaleString()} كم` : `${Math.round(nextService.remainingKm).toLocaleString()} km remaining`)
+                      : (isAr ? 'لا توجد بيانات صيانة بعد' : 'No maintenance logged yet')}
                   </Text>
                   <View style={styles.progressBarTrack}>
-                    <View style={[styles.progressBarFill, { width: '85%' }]} />
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${nextService ? nextService.percentRemaining : 0}%`,
+                          backgroundColor: nextService?.overdue ? COLORS.danger : COLORS.warning,
+                        },
+                      ]}
+                    />
                   </View>
                 </View>
 
