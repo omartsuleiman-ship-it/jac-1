@@ -2,7 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router'; // 👈 استدعاء الـ SearchParams
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -20,7 +20,7 @@ import {
   View,
 } from 'react-native';
 import { isConnected, sendOBDCommand } from '../services/bleService';
-import { useLang } from './_layout'; // ── استدعاء اللغة ──
+import { useLang } from './_layout';
 
 const COLORS = {
   background: '#0B0D10',
@@ -51,7 +51,6 @@ Notifications.setNotificationHandler({
 
 type MaintenanceUnit = 'km' | 'months';
 
-// ── تعديل الـ Interface لدعم اللغتين ──
 interface MaintenanceConfig {
   id: string;
   labelEn: string;
@@ -73,7 +72,6 @@ interface MaintenanceRecord {
 
 type RecordsMap = Record<string, MaintenanceRecord>;
 
-// ── ترجمة القطع ──
 const MAINTENANCE_CONFIG: MaintenanceConfig[] = [
   { id: 'engine_oil', labelEn: 'Engine Oil', labelAr: 'زيت المحرك', icon: 'water-outline', unit: 'km', options: [3000, 5000, 10000], allowCustom: true },
   { id: 'transmission_fluid', labelEn: 'Transmission Fluid', labelAr: 'زيت الفتيس', icon: 'settings-outline', unit: 'km', options: [40000, 60000, 80000], allowCustom: true },
@@ -86,19 +84,14 @@ const MAINTENANCE_CONFIG: MaintenanceConfig[] = [
 
 const STORAGE_KEY_RECORDS = '@car_app/maintenance_records_v1';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
+const STORAGE_KEY_ODOMETER_NOTIF = '@car_app/odometer_reminder_id'; // 👈 مفتاح جديد للإشعار
 
-// ── Read-only odometer probes. These only REQUEST data — no Security Access
-// (Seed/Key) sequence is ever sent. If the ECU replies "7F 22 33" (Security
-// Access Denied) or "NO DATA", we report that and stop; we never attempt to
-// bypass it. ──
 type OdometerProbe = { label: string; setup?: string; command: string };
 const ODOMETER_PROBES: OdometerProbe[] = [
-  // 7C0 and 720 are common headers for Instrument Clusters (IPC) where Odometer usually lives
   { label: 'Cluster Header 7C0 - 22 D0 01', setup: 'ATSH7C0', command: '22D001' },
   { label: 'Cluster Header 7C0 - 22 A6', setup: 'ATSH7C0', command: '22A6' },
   { label: 'Cluster Header 720 - 22 22 06', setup: 'ATSH720', command: '222206' },
   { label: 'Cluster Header 720 - 22 A6', setup: 'ATSH720', command: '22A6' },
-  // Reset back to Engine ECU (7E0) to ensure other app functions aren't broken after this test
   { label: 'Reset to Engine ECU', setup: 'ATSH7E0', command: '0100' },
 ];
 
@@ -115,7 +108,6 @@ interface ItemStatus {
   overdue: boolean;
 }
 
-// ── تعديل دالة الحالة لدعم اللغتين ──
 function getItemStatus(
   item: MaintenanceConfig,
   record: MaintenanceRecord | undefined,
@@ -225,7 +217,8 @@ function estimateDueDate(item: MaintenanceConfig, record: MaintenanceRecord): Da
 }
 
 export default function MaintenanceScreen() {
-  const { isAr } = useLang(); // ── جلب اللغة ──
+  const { isAr } = useLang();
+  const params = useLocalSearchParams(); // 👈 عشان نلقط اللينك من الإشعار
 
   const [loading, setLoading] = useState(true);
   const [records, setRecords] = useState<RecordsMap>({});
@@ -244,6 +237,35 @@ export default function MaintenanceScreen() {
   const [checkingOdometer, setCheckingOdometer] = useState(false);
 
   const responseListener = useRef<Notifications.EventSubscription | null>(null);
+
+  // 🚀 NEW: دالة برمجة إشعار العداد الذكية (7 أيام للنجاح، 1 يوم للتجاهل)
+  const scheduleOdometerReminder = async (days: number) => {
+    try {
+      const storedNotifId = await AsyncStorage.getItem(STORAGE_KEY_ODOMETER_NOTIF);
+      if (storedNotifId) {
+        await Notifications.cancelScheduledNotificationAsync(storedNotifId);
+      }
+      const seconds = days * 24 * 60 * 60; // نحول الأيام لثواني
+      const notificationId = await Notifications.scheduleNotificationAsync({
+        content: {
+          title: isAr ? 'تحديث العداد 🚗' : 'Odometer Update 🚗',
+          body: isAr 
+            ? 'حان الوقت لتحديث قراءة عداد المسافات لضمان دقة مواعيد الصيانة.'
+            : 'Time to manually update your odometer reading to keep maintenance schedules accurate.',
+          data: { action: 'update_odometer' },
+          sound: 'default',
+        },
+        trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+          seconds: seconds,
+          channelId: Platform.OS === 'android' ? 'maintenance-reminders' : undefined,
+        },
+      });
+      await AsyncStorage.setItem(STORAGE_KEY_ODOMETER_NOTIF, notificationId);
+    } catch (error) {
+      console.warn('Failed to schedule odometer reminder', error);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -279,7 +301,14 @@ export default function MaintenanceScreen() {
     };
   }, []);
 
- useEffect(() => {
+  // 🚀 NEW: لو ضغط على إشعار العداد، نفتح الـ Modal فوراً
+  useEffect(() => {
+    if (params.action === 'update_odometer' && !loading) {
+      openOdometerModal();
+    }
+  }, [params.action, loading]);
+
+  useEffect(() => {
     if (pendingItemId && !loading) {
       const targetItem = MAINTENANCE_CONFIG.find((cfg) => cfg.id === pendingItemId);
       if (targetItem) {
@@ -289,7 +318,6 @@ export default function MaintenanceScreen() {
     }
   }, [pendingItemId, loading]);
 
-  // ── Reload the odometer whenever this screen regains focus (fed by trip.tsx and the 01A6 auto-fetch) ──
   useFocusEffect(
     useCallback(() => {
       (async () => {
@@ -334,8 +362,10 @@ export default function MaintenanceScreen() {
     setOdometerModalVisible(true);
   };
 
-  const closeOdometerModal = () => {
+  // 🚀 NEW: لوجيك القفل. لو savedNewValue بـ false (يعني تجاهل)، يرجع كمان يوم.
+  const closeOdometerModal = (savedNewValue: boolean = false) => {
     setOdometerModalVisible(false);
+    scheduleOdometerReminder(savedNewValue ? 7 : 1);
   };
 
   const handleSaveOdometer = async () => {
@@ -347,6 +377,12 @@ export default function MaintenanceScreen() {
       );
       return;
     }
+    // 🚀 NEW: لو داس حفظ على نفس الرقم القديم بالظبط يعتبر تجاهل (هيجي تاني يوم)
+    if (value === currentOdometer) {
+      closeOdometerModal(false); 
+      return;
+    }
+    
     if (value < currentOdometer) {
       Alert.alert(
         isAr ? 'تأكيد' : 'Confirm',
@@ -360,15 +396,16 @@ export default function MaintenanceScreen() {
             style: 'destructive',
             onPress: async () => {
               await persistOdometer(value);
-              closeOdometerModal();
+              closeOdometerModal(true); // 👈 قيمة جديدة، نام 7 أيام
             },
           },
         ]
       );
       return;
     }
+    
     await persistOdometer(value);
-    closeOdometerModal();
+    closeOdometerModal(true); // 👈 قيمة جديدة، نام 7 أيام
   };
 
   const handleCheckOdometerAccess = async () => {
@@ -392,12 +429,12 @@ export default function MaintenanceScreen() {
           const raw = await sendOBDCommand(probe.command);
           const hex = raw.replace(/[\s>]/g, '').toUpperCase();
           const isNoData = hex.length === 0 || hex.includes('NODATA') || hex.includes('SEARCHING');
-          const isNegativeResponse = hex.startsWith('7F'); // includes Security Access Denied (7F 22 33)
+          const isNegativeResponse = hex.startsWith('7F'); 
           const success = !isNoData && !isNegativeResponse;
 
           results.push({ label: probe.label, response: raw.trim() || (isAr ? 'لا رد' : 'no reply'), success });
 
-          if (success) break; // لقينا رد صالح — نوقف، مفيش داعي نكمل باقي المحاولات
+          if (success) break; 
         } catch {
           results.push({ label: probe.label, response: isAr ? 'فشل الإرسال' : 'send failed', success: false });
         }
@@ -704,9 +741,10 @@ export default function MaintenanceScreen() {
       {/* ------------------------------------------------------------------ */}
       {/* MASTER ODOMETER MODAL */}
       {/* ------------------------------------------------------------------ */}
-      <Modal visible={odometerModalVisible} animationType="slide" transparent onRequestClose={closeOdometerModal}>
+      {/* 🚀 NEW: استبدال أي غلق للـ Modal بالـ closeOdometerModal(false) عشان يفهم إنه تجاهل */}
+      <Modal visible={odometerModalVisible} animationType="slide" transparent onRequestClose={() => closeOdometerModal(false)}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-          <Pressable style={styles.modalOverlay} onPress={closeOdometerModal}>
+          <Pressable style={styles.modalOverlay} onPress={() => closeOdometerModal(false)}>
             <Pressable style={styles.modalSheet} onPress={(e) => e.stopPropagation()}>
               <View style={styles.modalHandle} />
               <View style={[styles.modalHeaderRow, { flexDirection: isAr ? 'row-reverse' : 'row' }]}>
@@ -716,7 +754,7 @@ export default function MaintenanceScreen() {
                 <Text style={[styles.modalTitle, { textAlign: isAr ? 'right' : 'left' }]}>
                   {isAr ? 'تحديث قراءة العداد' : 'Update Odometer Reading'}
                 </Text>
-                <TouchableOpacity onPress={closeOdometerModal} hitSlop={10}>
+                <TouchableOpacity onPress={() => closeOdometerModal(false)} hitSlop={10}>
                   <Ionicons name="close" size={22} color={COLORS.textSecondary} />
                 </TouchableOpacity>
               </View>
@@ -737,7 +775,7 @@ export default function MaintenanceScreen() {
                   placeholderTextColor={COLORS.textSecondary}
                   value={odometerModalInput}
                   onChangeText={setOdometerModalInput}
-                  autoFocus
+                  autoFocus={true} // 👈 دي اللي بتنطط الكيبورد أول ما الشاشة تفتح
                 />
               </View>
 
