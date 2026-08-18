@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected, LiveDataKey, SafetyDataKey, TirePressures } from '../services/bleService';
+import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -120,18 +120,8 @@ const getAtfTempStatus = (temp: number | null): CardStatus => {
   return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
 };
 
-const getAbsPressureStatus = (pressure: number | null): CardStatus => {
-  if (pressure === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (pressure < 10) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
-};
-
-const getTirePressureStatus = (pressure: number | null): CardStatus => {
-  if (pressure === null) return { tone: 'warning', statusEn: '--', statusAr: '--' };
-  if (pressure < 25 || pressure > 45) return { tone: 'danger', statusEn: 'Danger', statusAr: 'خطر' };
-  if (pressure >= 26 && pressure <= 29) return { tone: 'warning', statusEn: 'Check', statusAr: 'فحص' };
-  return { tone: 'success', statusEn: 'Normal', statusAr: 'طبيعي' };
-};
+// ABS and Tire Pressure status helpers removed: raw terminal testing showed
+// this ELM327 cannot reach those ECUs (NO DATA / timeouts on 7B0 and 7A0).
 // -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
@@ -156,8 +146,6 @@ const LIVE_PARAMS: LiveParamMeta[] = [
   { id: 'o2', icon: 'analytics-outline', labelEn: 'O2 Sensor', labelAr: 'الأكسجين', category: 'engine' },
   { id: 'fuelTrim', icon: 'options-outline', labelEn: 'Fuel Trim', labelAr: 'ضبط الوقود', category: 'engine' },
   { id: 'atfTemp', icon: 'cog-outline', labelEn: 'Trans Temp', labelAr: 'حرارة الفتيس', category: 'safety' },
-  { id: 'absPressure', icon: 'disc-outline', labelEn: 'Brake Press', labelAr: 'ضغط الفرامل', category: 'safety' },
-  { id: 'tirePressure', icon: 'radio-button-on-outline', labelEn: 'Tire Pressure', labelAr: 'ضغط الكاوتش', category: 'safety' },
 ];
 
 const DEFAULT_SELECTED_PARAMS: LiveParamId[] = ['rpm', 'coolant', 'voltage'];
@@ -214,13 +202,11 @@ export default function DiagnosticsScreen() {
     rpm: null, coolant: null, voltage: null, engineLoad: null, maf: null, o2: null, fuelTrim: null,
   });
 
-  // --- EXTRA SAFETY DATA state (TCM, ABS, TPMS) ---
+  // --- EXTRA SAFETY DATA state (TCM only; ABS/TPMS ECUs unreachable) ---
   const [extraSafetyData, setExtraSafetyData] = useState<{
     atfTemp: number | null;
-    absPressure: number | null;
-    tirePressure: TirePressures;
   }>({
-    atfTemp: null, absPressure: null, tirePressure: { fl: null, fr: null, rl: null, rr: null },
+    atfTemp: null,
   });
 
   const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
@@ -496,10 +482,6 @@ export default function DiagnosticsScreen() {
   const actualFuelTrim = connected ? liveData.fuelTrim : null;
   
   const actualAtfTemp = connected ? extraSafetyData.atfTemp : null;
-  const actualAbsPressure = connected ? extraSafetyData.absPressure : null;
- const actualTirePressure: TirePressures = connected
-    ? extraSafetyData.tirePressure
-    : { fl: null, fr: null, rl: null, rr: null };
 
 
   // ---------------------------------------------------------------------------
@@ -716,29 +698,6 @@ export default function DiagnosticsScreen() {
                     dir={dir}
                     isLoading={isLiveDataLoading}
                     isWaiting={actualAtfTemp === null}
-                  />
-                )}
-                {selectedParams.has('absPressure') && (
-                  <LiveCard
-                    icon="disc-outline"
-                    tone={getAbsPressureStatus(actualAbsPressure).tone}
-                    value={actualAbsPressure !== null ? actualAbsPressure.toFixed(1) : '--'}
-                    unit="bar"
-                    labelEn="Brake Press"
-                    labelAr="ضغط الفرامل"
-                    statusEn={getAbsPressureStatus(actualAbsPressure).statusEn}
-                    statusAr={getAbsPressureStatus(actualAbsPressure).statusAr}
-                    isAr={isAr}
-                    dir={dir}
-                    isLoading={isLiveDataLoading}
-                    isWaiting={actualAbsPressure === null}
-                  />
-                )}
-                {selectedParams.has('tirePressure') && (
-                  <TPMSCard
-                    tirePressure={actualTirePressure}
-                    isAr={isAr}
-                    isLoading={isLiveDataLoading}
                   />
                 )}
                 {selectedParams.has('coolant') && (
@@ -1214,71 +1173,6 @@ function LiveCard({
   return <View style={cardStyle}>{CardInner}</View>;
 }
 
-function TPMSCard({
-  tirePressure,
-  isAr,
-  isLoading,
-}: {
-  tirePressure: TirePressures;
-  isAr: boolean;
-  isLoading: boolean;
-}) {
-  const WHEEL_LABELS: Record<keyof TirePressures, { en: string; ar: string }> = {
-    fl: { en: 'Front Left', ar: 'أمامي يسار' },
-    fr: { en: 'Front Right', ar: 'أمامي يمين' },
-    rl: { en: 'Rear Left', ar: 'خلفي يسار' },
-    rr: { en: 'Rear Right', ar: 'خلفي يمين' },
-  };
-
-  // Physical wheel positions are fixed relative to the car's nose — they do
-  // NOT mirror with RTL/LTR text direction, only the label text does.
-  const renderWheel = (key: keyof TirePressures, positionStyle: any) => {
-    const value = tirePressure[key];
-    const status = getTirePressureStatus(value);
-    const color = urgencyColor(status.tone);
-    const dim = urgencyDim(status.tone);
-    return (
-      <View style={[styles.tpmsWheel, positionStyle, { backgroundColor: dim, borderColor: color }]}>
-        {isLoading && value === null ? (
-          <ActivityIndicator color={color} size="small" />
-        ) : (
-          <>
-            <Text style={[styles.tpmsWheelValue, { color }]}>{value !== null ? value.toFixed(0) : '--'}</Text>
-            <Text style={styles.tpmsWheelUnit}>PSI</Text>
-          </>
-        )}
-        <Text style={styles.tpmsWheelLabel}>{isAr ? WHEEL_LABELS[key].ar : WHEEL_LABELS[key].en}</Text>
-      </View>
-    );
-  };
-
-  return (
-    <View style={[styles.liveCard, { width: '100%', paddingVertical: 24, alignItems: 'center' }]}>
-      <Text style={[styles.sectionHeading, { alignSelf: 'flex-start', marginBottom: 16, marginHorizontal: 4 }]}>
-        {isAr ? 'ضغط الكاوتش' : 'Tire Pressure'}
-      </Text>
-
-      <View style={styles.tpmsLayout}>
-        {renderWheel('fl', styles.tpmsWheelFL)}
-        {renderWheel('fr', styles.tpmsWheelFR)}
-
-        {/* Top-down chassis — nose points up, cabin below the windshield */}
-        <View style={styles.tpmsChassis}>
-          <Ionicons name="car-sport" size={20} color={COLORS.textTertiary} style={styles.tpmsNoseIcon} />
-          <View style={styles.tpmsWindshield} />
-          <View style={styles.tpmsDriverBadge}>
-            <Ionicons name="disc-outline" size={14} color={COLORS.textSecondary} />
-            <Text style={styles.tpmsDriverText}>{isAr ? 'السائق' : 'Driver'}</Text>
-          </View>
-        </View>
-
-        {renderWheel('rl', styles.tpmsWheelRL)}
-        {renderWheel('rr', styles.tpmsWheelRR)}
-      </View>
-    </View>
-  );
-}
-
 function AdviceModal({
   visible,
   onClose,
@@ -1569,43 +1463,6 @@ const styles = StyleSheet.create({
   liveLabel: { color: COLORS.textSecondary, fontSize: 11.5 },
   liveCardHint: { alignItems: 'center', gap: 4, marginTop: 8 },
   liveCardHintText: { color: COLORS.textTertiary, fontSize: 10, fontWeight: '600' },
-
-  tpmsLayout: { width: 260, height: 260, alignItems: 'center', justifyContent: 'center' },
-  tpmsChassis: {
-    width: 90,
-    height: 200,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    alignItems: 'center',
-  },
-  tpmsNoseIcon: { position: 'absolute', top: 6, alignSelf: 'center' },
-  tpmsWindshield: {
-    width: 60,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: COLORS.cardBorder,
-    marginTop: 34,
-  },
-  tpmsDriverBadge: { position: 'absolute', top: 46, left: 8, alignItems: 'center', gap: 2 },
-  tpmsDriverText: { color: COLORS.textTertiary, fontSize: 8, fontWeight: '700' },
-  tpmsWheel: {
-    position: 'absolute',
-    width: 64,
-    height: 64,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tpmsWheelFL: { top: 8, left: 0 },
-  tpmsWheelFR: { top: 8, right: 0 },
-  tpmsWheelRL: { bottom: 8, left: 0 },
-  tpmsWheelRR: { bottom: 8, right: 0 },
-  tpmsWheelValue: { fontSize: 17, fontWeight: '900' },
-  tpmsWheelUnit: { color: COLORS.textSecondary, fontSize: 9, fontWeight: '700', marginTop: -2 },
-  tpmsWheelLabel: { color: COLORS.textTertiary, fontSize: 8, fontWeight: '700', marginTop: 2, textAlign: 'center' },
 
   sectionHeading: { color: COLORS.textPrimary, fontSize: 15.5, fontWeight: '800', marginBottom: 4 },
   sectionSubheading: { color: COLORS.textSecondary, fontSize: 12.5, marginBottom: 14, lineHeight: 18 },

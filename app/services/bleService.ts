@@ -771,44 +771,19 @@ const querySafetyECU = async (
   }
 };
 
-// ── TPMS: 4-wheel pressure shape used by <TPMSCard/> in diagnostics.tsx ──
-export type TirePressures = { fl: number | null; fr: number | null; rl: number | null; rr: number | null };
-const EMPTY_TIRE_PRESSURES: TirePressures = { fl: null, fr: null, rl: null, rr: null };
-
-// We do not yet know JAC's exact TPMS payload layout (byte order per wheel,
-// scaling factor, or whether all 4 values even come back in one response vs.
-// needing separate frames). Rather than guess an offset and silently show a
-// fabricated pressure, this returns nulls until a real [BLE] raw response is
-// captured and the layout is confirmed — update the body below at that point.
-const parseTPMSResponse = (raw: string): TirePressures => {
-  const hex = raw.replace(/[\s>]/g, '').toUpperCase();
-  const idx = hex.indexOf('62D001');
-  if (idx === -1) return EMPTY_TIRE_PRESSURES;
-  // const data = hex.substring(idx + 6);
-  // const bytes = data.match(/.{1,2}/g) || [];
-  // TODO: confirm FL/FR/RL/RR byte order + PSI scaling from a live capture,
-  // then return { fl, fr, rl, rr } parsed from `bytes` instead of nulls.
-  return EMPTY_TIRE_PRESSURES;
-};
-
-export type SafetyDataKey = 'atfTemp' | 'absPressure' | 'tirePressure';
+export type SafetyDataKey = 'atfTemp';
 
 export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
   let atfTemp: number | null = null;
-  let absPressure: number | null = null;
-  let tirePressure: TirePressures = EMPTY_TIRE_PRESSURES;
 
-  // Only probe ECUs the user actually selected — if all three are
-  // deselected, `targets` is empty and every ATSH switch below is skipped.
+  // Only probe ECUs the user actually selected — if deselected, `targets`
+  // is empty and every ATSH switch below is skipped.
+  // ABS (7B0) and TPMS (7A0) probes were removed: raw terminal testing
+  // confirmed this ELM327 can only reach the Engine (7E0) and Transmission
+  // (7E1) ECUs, and querying the other two only produced NO DATA / timeouts.
   const targets: { header: string; request: string; label: string; key: SafetyDataKey }[] = [];
   if (selectedKeys.includes('atfTemp')) {
     targets.push({ header: '7E1', request: '222001', label: 'Transmission (ATF temp)', key: 'atfTemp' });
-  }
-  if (selectedKeys.includes('absPressure')) {
-    targets.push({ header: '7B0', request: '22C001', label: 'ABS (brake pressure)', key: 'absPressure' });
-  }
-  if (selectedKeys.includes('tirePressure')) {
-    targets.push({ header: '7A0', request: '22D001', label: 'TPMS (tire pressure)', key: 'tirePressure' });
   }
 
   try {
@@ -820,11 +795,8 @@ export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
     // sequence atomic, which is the actual fix for every parameter returning
     // null once more than one non-engine ECU was selected.
     for (const target of targets) {
-      const result = await querySafetyECU(target.header, target.request, target.label);
-      if (target.key === 'tirePressure' && result.ok) {
-        tirePressure = parseTPMSResponse(result.raw);
-      }
-      // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
+      await querySafetyECU(target.header, target.request, target.label);
+      // Parsing logic for ATF goes here once we confirm JAC's exact hex
       // format from the [BLE] raw response logs — result.raw holds it.
     }
   } finally {
@@ -840,5 +812,5 @@ export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
     }
   }
 
-  return { atfTemp, absPressure, tirePressure };
+  return { atfTemp };
 };

@@ -4,21 +4,17 @@ import * as Notifications from 'expo-notifications';
 import { Tabs } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
-import { getExtraSafetyData, getLiveData, isConnected, LiveDataKey, SafetyDataKey, TirePressures } from '../services/bleService';
+import { getExtraSafetyData, getLiveData, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
 
 // The watchdog always monitors this fixed critical set, independent of
 // whatever the user has chosen to display on the diagnostics dashboard —
 // background danger alerting and the customizable live-data view are
 // separate concerns.
+// ABS and TPMS were dropped from the watchdog: raw terminal testing showed
+// this ELM327 can only reach the Engine (7E0) and Transmission (7E1) ECUs —
+// polling 7B0 (ABS) / 7A0 (TPMS) only produced NO DATA / timeouts.
 const WATCHDOG_LIVE_KEYS: LiveDataKey[] = ['coolant', 'voltage'];
-const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = ['atfTemp', 'absPressure', 'tirePressure'];
-
-const TIRE_LABELS: Record<keyof TirePressures, { ar: string; en: string }> = {
-  fl: { ar: 'أمامي يسار', en: 'Front Left' },
-  fr: { ar: 'أمامي يمين', en: 'Front Right' },
-  rl: { ar: 'خلفي يسار', en: 'Rear Left' },
-  rr: { ar: 'خلفي يمين', en: 'Rear Right' },
-};
+const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = ['atfTemp'];
 
 // ضبط إعدادات الإشعارات للتوافق مع الإصدارات الحديثة
 Notifications.setNotificationHandler({
@@ -238,23 +234,7 @@ function GlobalSafetyWatchdog() {
 
         checkMetric('coolant', live.coolant, (v: number) => (v > 115 ? { tone: 'danger' } : v >= 106 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة المحرك', 'Engine Temp', `${live.coolant}°C`);
         checkMetric('atf', extra.atfTemp, (v: number) => (v > 110 ? { tone: 'danger' } : v > 90 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة الفتيس', 'Trans Temp', `${extra.atfTemp}°C`);
-        checkMetric('abs', extra.absPressure, (v: number) => (v < 10 ? { tone: 'danger' } : { tone: 'success' }), 'ضغط الفرامل', 'Brake Pressure', `${extra.absPressure} bar`);
         checkMetric('volt', live.voltage, (v: number) => (v < 11.5 || v > 15.0 ? { tone: 'danger' } : v < 13.3 ? { tone: 'warning' } : { tone: 'success' }), 'جهد البطارية', 'Battery Voltage', `${live.voltage}V`);
-
-        // Tire pressure is now 4 independent wheel readings, not one value —
-        // check each wheel against its own key so a single flat/low tire
-        // doesn't get masked by the other three being fine.
-        (Object.keys(extra.tirePressure) as (keyof TirePressures)[]).forEach((wheel) => {
-          const value = extra.tirePressure[wheel];
-          checkMetric(
-            `tire_${wheel}`,
-            value,
-            (v: number) => (v < 25 || v > 45 ? { tone: 'danger' } : v <= 29 ? { tone: 'warning' } : { tone: 'success' }),
-            `ضغط الكاوتش (${TIRE_LABELS[wheel].ar})`,
-            `Tire Pressure (${TIRE_LABELS[wheel].en})`,
-            `${value} PSI`
-          );
-        });
       } catch (e) {}
     };
 
