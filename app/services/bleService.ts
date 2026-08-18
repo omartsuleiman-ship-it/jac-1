@@ -711,20 +711,23 @@ const querySafetyECU = async (
   label: string
 ): Promise<SafetyProbeResult> => {
   try {
-    // 1. Point the adapter at this ECU's transmit header
-    await sendOBDCommand(`ATSH${header}`, 500);
+    // AT config commands (ATSH/ATCRA/ATFCSM) are answered instantly by the
+    // adapter itself — they never wait on a CAN bus round trip — so 300ms is
+    // generous, not risky. Only the UDS `request` below has to wait for a
+    // real (or absent) ECU reply, hence its own separate timeout.
+    await sendOBDCommand(`ATSH${header}`, 300);
 
-    // 2. Filter incoming frames to ONLY this ECU's reply ID (header + 8, per
+    // Filter incoming frames to ONLY this ECU's reply ID (header + 8, per
     // ISO 15765-4 — e.g. 7E1 -> 7E9). Without this, replies/noise from other
     // modules on the shared bus can land in the buffer and corrupt parsing.
     const replyId = (parseInt(header, 16) + 8).toString(16).toUpperCase();
-    await sendOBDCommand(`ATCRA${replyId}`, 500);
+    await sendOBDCommand(`ATCRA${replyId}`, 300);
 
-    // 3. Explicit automatic flow control — ensures multi-frame ISO-TP replies
+    // Explicit automatic flow control — ensures multi-frame ISO-TP replies
     // (UDS payloads >7 bytes) aren't cut short waiting on a Flow Control frame
-    await sendOBDCommand('ATFCSM0', 500);
+    await sendOBDCommand('ATFCSM0', 300);
 
-    const raw = await sendOBDCommand(request, 800);
+    const raw = await sendOBDCommand(request, 500);
     const upper = raw.toUpperCase();
     const ok = !upper.includes('NO DATA') && !upper.includes('ERROR') && !upper.includes('UNABLE') && !upper.startsWith('7F');
 
@@ -735,13 +738,15 @@ const querySafetyECU = async (
     }
     return { label, raw, ok };
   } catch (error) {
-    // Isolated per-ECU: a timeout or error here never blocks the next module
+    // A timeout here rejects via queueRawCommand's own setTimeout, which
+    // already clears activeCommand and calls processQueue() — so we land
+    // here cleanly instead of the queue stalling.
     console.warn(`[BLE] ${label} fetch failed`, error);
     return { label, raw: '', ok: false };
   } finally {
     // Clear this ECU's receive filter before the next module (or the final
     // engine-header fallback) picks its own
-    await sendOBDCommand('ATCRA', 500).catch(() => {});
+    await sendOBDCommand('ATCRA', 300).catch(() => {});
   }
 };
 
@@ -772,44 +777,46 @@ export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
   let absPressure: number | null = null;
   let tirePressure: TirePressures = EMPTY_TIRE_PRESSURES;
 
-  // CRITICAL: the probe list is built from ONLY what's selected. If none of
-  // these three keys are selected, `probes` stays empty, no ATSH header
-  // switch is ever sent for that ECU, and Promise.all resolves immediately —
-  // this is what eliminates the lag when Transmission/ABS/TPMS aren't being
-  // watched.
-  const probes: Promise<SafetyProbeResult & { key: SafetyDataKey }>[] = [];
-
+  // Only probe ECUs the user actually selected — if all three are
+  // deselected, `targets` is empty and every ATSH switch below is skipped.
+  const targets: { header: string; request: string; label: string; key: SafetyDataKey }[] = [];
   if (selectedKeys.includes('atfTemp')) {
-    probes.push(
-      querySafetyECU('7E1', '222001', 'Transmission (ATF temp)').then((r) => ({ ...r, key: 'atfTemp' as const }))
-    );
+    targets.push({ header: '7E1', request: '222001', label: 'Transmission (ATF temp)', key: 'atfTemp' });
   }
   if (selectedKeys.includes('absPressure')) {
-    probes.push(
-      querySafetyECU('7B0', '22C001', 'ABS (brake pressure)').then((r) => ({ ...r, key: 'absPressure' as const }))
-    );
+    targets.push({ header: '7B0', request: '22C001', label: 'ABS (brake pressure)', key: 'absPressure' });
   }
   if (selectedKeys.includes('tirePressure')) {
-    probes.push(
-      querySafetyECU('7A0', '22D001', 'TPMS (tire pressure)').then((r) => ({ ...r, key: 'tirePressure' as const }))
-    );
+    targets.push({ header: '7A0', request: '22D001', label: 'TPMS (tire pressure)', key: 'tirePressure' });
   }
 
-  const results = await Promise.all(probes);
-
-  for (const result of results) {
-    // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
-    // format from the [BLE] raw response logs — result.raw holds it.
-    if (result.key === 'tirePressure' && result.ok) {
-      tirePressure = parseTPMSResponse(result.raw);
+  try {
+    // SEQUENTIAL, not Promise.all. ATSH/ATCRA are global adapter state, not
+    // per-request — running probes "concurrently" let one ECU's commands
+    // interleave with another's in the shared queue, so a request could fire
+    // after a different probe had already overwritten the header. Running
+    // them one at a time keeps each ECU's full header->filter->request->clear
+    // sequence atomic, which is the actual fix for every parameter returning
+    // null once more than one non-engine ECU was selected.
+    for (const target of targets) {
+      const result = await querySafetyECU(target.header, target.request, target.label);
+      if (target.key === 'tirePressure' && result.ok) {
+        tirePressure = parseTPMSResponse(result.raw);
+      }
+      // Parsing logic for ATF/ABS goes here once we confirm JAC's exact hex
+      // format from the [BLE] raw response logs — result.raw holds it.
     }
-  }
-
-  // Only reset the header if we actually switched away from it — if nothing
-  // in `probes` ran (all three deselected), no ATSH was ever sent, so skip
-  // this too rather than sending a pointless extra command every cycle.
-  if (probes.length > 0) {
-    await sendOBDCommand('ATSH7E0', 500).catch(() => {});
+  } finally {
+    // Always reset to the Engine ECU header, even if a probe above threw
+    // unexpectedly — guarantees the next engine-PID poll never inherits a
+    // stale non-engine header or receive filter.
+    if (targets.length > 0) {
+      try {
+        await sendOBDCommand('ATSH7E0', 300);
+      } catch (error) {
+        console.warn('[BLE] Failed to reset header to 7E0:', error);
+      }
+    }
   }
 
   return { atfTemp, absPressure, tirePressure };
