@@ -50,6 +50,22 @@ const DEFAULT_REGION: Region = {
 const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
+// ── Eco Score: compares this trip's fuel consumption (L/100km) against a
+// rough efficient-vs-poor range for the JAC S3 1.5L. 100 = at/below the
+// efficient benchmark, 0 = at/above the poor benchmark, linear between.
+// This is a relative heuristic for trip-to-trip comparison, not a
+// manufacturer-calibrated "true" efficiency figure.
+const ECO_L_PER_100KM_EXCELLENT = 6;
+const ECO_L_PER_100KM_POOR = 12;
+
+const calculateEcoScore = (distanceKm: number, fuelLiters: number): number | null => {
+  if (distanceKm <= 0 || fuelLiters <= 0) return null; // trip too short / no OBD fuel data to score fairly
+  const lPer100km = (fuelLiters / distanceKm) * 100;
+  const range = ECO_L_PER_100KM_POOR - ECO_L_PER_100KM_EXCELLENT;
+  const raw = 100 - ((lPer100km - ECO_L_PER_100KM_EXCELLENT) / range) * 100;
+  return Math.max(0, Math.min(100, Math.round(raw)));
+};
+
 // ── OSRM Route Fetcher (Modified to return distance) ──
 async function fetchOsrmRoute(from: Coords, to: Coords): Promise<{coords: Coords[], distanceKm: number}> {
   const url = `${OSRM_BASE_URL}/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=full&geometries=geojson`;
@@ -642,7 +658,9 @@ export default function TripCostScreen() {
                   date: new Date().toLocaleDateString('en-GB'),
                   from: fromText || (isAr ? 'غير محدد' : 'Blank'),
                   to: toText || (isAr ? 'غير محدد' : 'Blank'),
-                  cost: totalCost.toFixed(2)
+                  cost: totalCost.toFixed(2),
+                  distanceKm,
+                  ecoScore: calculateEcoScore(distanceKm, fuelConsumedLiters),
                 };
                 const updated = [newTrip, ...recentTrips].slice(0, 10);
                 setRecentTrips(updated);
