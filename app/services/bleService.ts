@@ -4,7 +4,28 @@ import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 
 // ── BLE Manager ──
-export const bleManager = new BleManager();
+// restoreStateIdentifier is what actually lets iOS relaunch/reattach this app
+// to an already-connected peripheral after backgrounding or a suspend/kill —
+// this, not a background-fetch task, is the correct react-native-ble-plx
+// mechanism the bluetooth-central mode is meant to pair with.
+const BLE_RESTORE_STATE_ID = 'jac-obd-central-manager';
+
+export const bleManager = new BleManager({
+  restoreStateIdentifier: BLE_RESTORE_STATE_ID,
+  restoreStateFunction: (restoredState) => {
+    if (restoredState && restoredState.connectedPeripherals.length > 0) {
+      const restoredDevice = restoredState.connectedPeripherals[0];
+      console.log('[BLE] iOS restored connection to:', restoredDevice.id);
+      // Re-attach write/notify characteristics + command queue to the
+      // restored device so it's usable the moment the app is foregrounded
+      setOBDDevice(restoredDevice).catch((error) => {
+        console.warn('[BLE] Failed to re-attach after state restoration:', error);
+      });
+    } else {
+      console.log('[BLE] iOS restore callback fired with no connected peripheral');
+    }
+  },
+});
 
 // ── OBD-II Service & Characteristic UUIDs ──
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';

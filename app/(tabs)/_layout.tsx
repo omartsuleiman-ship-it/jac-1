@@ -3,8 +3,22 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import { Tabs } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
-import { getExtraSafetyData, getLiveData, isConnected } from '../services/bleService';
+import { AppState, StyleSheet, View } from 'react-native';
+import { getExtraSafetyData, getLiveData, isConnected, LiveDataKey, SafetyDataKey, TirePressures } from '../services/bleService';
+
+// The watchdog always monitors this fixed critical set, independent of
+// whatever the user has chosen to display on the diagnostics dashboard —
+// background danger alerting and the customizable live-data view are
+// separate concerns.
+const WATCHDOG_LIVE_KEYS: LiveDataKey[] = ['coolant', 'voltage'];
+const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = ['atfTemp', 'absPressure', 'tirePressure'];
+
+const TIRE_LABELS: Record<keyof TirePressures, { ar: string; en: string }> = {
+  fl: { ar: 'أمامي يسار', en: 'Front Left' },
+  fr: { ar: 'أمامي يمين', en: 'Front Right' },
+  rl: { ar: 'خلفي يسار', en: 'Rear Left' },
+  rr: { ar: 'خلفي يمين', en: 'Rear Right' },
+};
 
 // ضبط إعدادات الإشعارات للتوافق مع الإصدارات الحديثة
 Notifications.setNotificationHandler({
@@ -173,56 +187,89 @@ function GlobalSafetyWatchdog() {
   };
 
   useEffect(() => {
-    const interval = setInterval(async () => {
+    // Foreground/background is tracked explicitly rather than pretending the
+    // interval below keeps a fixed cadence everywhere — iOS throttles JS
+    // timers once backgrounded regardless of the bluetooth-central
+    // entitlement, so ticks may slow or stop while locked. What
+    // bluetooth-central + BLE state restoration (bleService.ts) actually
+    // guarantees is that the CONNECTION survives and this loop picks back up
+    // immediately on foreground — not that it runs at 10s cadence with the
+    // screen off.
+    const appStateRef = { current: AppState.currentState };
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      appStateRef.current = next;
+    });
+
+    const checkMetric = (
+      key: string,
+      val: number | null,
+      statusFn: any,
+      nameAr: string,
+      nameEn: string,
+      valStr: string
+    ) => {
+      if (val === null) return;
+      const currentTone = statusFn(val).tone;
+      const oldTone = previousStates.current[key] || 'success';
+
+      if (currentTone !== oldTone) {
+        if (currentTone === 'warning' && oldTone === 'success') {
+          sendAlert(
+            isAr ? `🟡 تنبيه فحص: ${nameAr}` : `🟡 Check Warning: ${nameEn}`,
+            isAr ? `القراءة تتطلب الانتباه: ${valStr}` : `Reading needs attention: ${valStr}`,
+            'warning'
+          );
+        } else if (currentTone === 'danger' && oldTone !== 'danger') {
+          sendAlert(
+            isAr ? `🔴 خطر توقف فوراً: ${nameAr}` : `🔴 DANGER STOP: ${nameEn}`,
+            isAr ? `القراءة وصلت لمستوى خطير: ${valStr}` : `Critical level reached: ${valStr}`,
+            'danger'
+          );
+        }
+        previousStates.current[key] = currentTone;
+      }
+    };
+
+    const runCheck = async () => {
       if (!isConnected()) return;
-
       try {
-        const live = await getLiveData();
-        const extra = await getExtraSafetyData();
+        const live = await getLiveData(WATCHDOG_LIVE_KEYS);
+        const extra = await getExtraSafetyData(WATCHDOG_SAFETY_KEYS);
 
-        const checkMetric = (
-          key: string, 
-          val: number | null, 
-          statusFn: any, 
-          nameAr: string, 
-          nameEn: string, 
-          valStr: string
-        ) => {
-          if (val === null) return;
+        checkMetric('coolant', live.coolant, (v: number) => (v > 115 ? { tone: 'danger' } : v >= 106 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة المحرك', 'Engine Temp', `${live.coolant}°C`);
+        checkMetric('atf', extra.atfTemp, (v: number) => (v > 110 ? { tone: 'danger' } : v > 90 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة الفتيس', 'Trans Temp', `${extra.atfTemp}°C`);
+        checkMetric('abs', extra.absPressure, (v: number) => (v < 10 ? { tone: 'danger' } : { tone: 'success' }), 'ضغط الفرامل', 'Brake Pressure', `${extra.absPressure} bar`);
+        checkMetric('volt', live.voltage, (v: number) => (v < 11.5 || v > 15.0 ? { tone: 'danger' } : v < 13.3 ? { tone: 'warning' } : { tone: 'success' }), 'جهد البطارية', 'Battery Voltage', `${live.voltage}V`);
 
-          // بنفترض إن الدوال دي موجودة في شاشة التشخيص أو هتاخد نفس الـ thresholds
-          const currentTone = statusFn(val).tone;
-          const oldTone = previousStates.current[key] || 'success';
-
-          if (currentTone !== oldTone) {
-            if (currentTone === 'warning' && oldTone === 'success') {
-              sendAlert(
-                isAr ? `🟡 تنبيه فحص: ${nameAr}` : `🟡 Check Warning: ${nameEn}`,
-                isAr ? `القراءة تتطلب الانتباه: ${valStr}` : `Reading needs attention: ${valStr}`,
-                'warning'
-              );
-            } else if (currentTone === 'danger' && oldTone !== 'danger') {
-              sendAlert(
-                isAr ? `🔴 خطر توقف فوراً: ${nameAr}` : `🔴 DANGER STOP: ${nameEn}`,
-                isAr ? `القراءة وصلت لمستوى خطير: ${valStr}` : `Critical level reached: ${valStr}`,
-                'danger'
-              );
-            }
-            previousStates.current[key] = currentTone;
-          }
-        };
-
-        // فحص الحساسات مع افتراض استدعاء دوال الحالات (تأكد من توافرها أو نقلها)
-        checkMetric('coolant', live.coolant, (v: number) => (v > 115 ? {tone: 'danger'} : v >= 106 ? {tone: 'warning'} : {tone: 'success'}), 'حرارة المحرك', 'Engine Temp', `${live.coolant}°C`);
-        checkMetric('atf', extra.atfTemp, (v: number) => (v > 110 ? {tone: 'danger'} : v > 90 ? {tone: 'warning'} : {tone: 'success'}), 'حرارة الفتيس', 'Trans Temp', `${extra.atfTemp}°C`);
-        checkMetric('tire', extra.tirePressure, (v: number) => (v < 25 || v > 45 ? {tone: 'danger'} : v <= 29 ? {tone: 'warning'} : {tone: 'success'}), 'ضغط الإطارات', 'Tire Pressure', `${extra.tirePressure} PSI`);
-        checkMetric('abs', extra.absPressure, (v: number) => (v < 10 ? {tone: 'danger'} : {tone: 'success'}), 'ضغط الفرامل', 'Brake Pressure', `${extra.absPressure} bar`);
-        checkMetric('volt', live.voltage, (v: number) => (v < 11.5 || v > 15.0 ? {tone: 'danger'} : v < 13.3 ? {tone: 'warning'} : {tone: 'success'}), 'جهد البطارية', 'Battery Voltage', `${live.voltage}V`);
-
+        // Tire pressure is now 4 independent wheel readings, not one value —
+        // check each wheel against its own key so a single flat/low tire
+        // doesn't get masked by the other three being fine.
+        (Object.keys(extra.tirePressure) as (keyof TirePressures)[]).forEach((wheel) => {
+          const value = extra.tirePressure[wheel];
+          checkMetric(
+            `tire_${wheel}`,
+            value,
+            (v: number) => (v < 25 || v > 45 ? { tone: 'danger' } : v <= 29 ? { tone: 'warning' } : { tone: 'success' }),
+            `ضغط الكاوتش (${TIRE_LABELS[wheel].ar})`,
+            `Tire Pressure (${TIRE_LABELS[wheel].en})`,
+            `${value} PSI`
+          );
+        });
       } catch (e) {}
-    }, 10000);
+    };
 
-    return () => clearInterval(interval);
+    const interval = setInterval(runCheck, 10000);
+    // Re-check immediately whenever the app returns to foreground, since the
+    // interval may have missed ticks (or all of them) while backgrounded
+    const foregroundSub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') runCheck();
+    });
+
+    return () => {
+      clearInterval(interval);
+      appStateSub.remove();
+      foregroundSub.remove();
+    };
   }, [isAr]);
 
   return null;
