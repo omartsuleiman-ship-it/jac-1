@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getEngineDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, getTransmissionDTCs, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
+import { getEngineDTCs, getLiveData, getMisfireCounters, getReadiness, getTransmissionDTCs, isConnected, LiveDataKey } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -127,7 +127,7 @@ const getAtfTempStatus = (temp: number | null): CardStatus => {
 // -----------------------------------------------------------------------------
 // Selective Live Data — parameter catalogue for the pick-and-choose dashboard
 // -----------------------------------------------------------------------------
-type LiveParamId = LiveDataKey | SafetyDataKey;
+type LiveParamId = LiveDataKey;
 
 type LiveParamMeta = {
   id: LiveParamId;
@@ -145,7 +145,6 @@ const LIVE_PARAMS: LiveParamMeta[] = [
   { id: 'maf', icon: 'flash-outline', labelEn: 'MAF Flow', labelAr: 'تدفق الهواء', category: 'engine' },
   { id: 'o2', icon: 'analytics-outline', labelEn: 'O2 Sensor', labelAr: 'الأكسجين', category: 'engine' },
   { id: 'fuelTrim', icon: 'options-outline', labelEn: 'Fuel Trim', labelAr: 'ضبط الوقود', category: 'engine' },
-  { id: 'atfTemp', icon: 'cog-outline', labelEn: 'Trans Temp', labelAr: 'حرارة الفتيس', category: 'safety' },
 ];
 
 const DEFAULT_SELECTED_PARAMS: LiveParamId[] = ['rpm', 'coolant', 'voltage'];
@@ -201,13 +200,6 @@ export default function DiagnosticsScreen() {
     fuelTrim: number | null;
   }>({
     rpm: null, coolant: null, voltage: null, engineLoad: null, maf: null, o2: null, fuelTrim: null,
-  });
-
-  // --- EXTRA SAFETY DATA state (TCM only; ABS/TPMS ECUs unreachable) ---
-  const [extraSafetyData, setExtraSafetyData] = useState<{
-    atfTemp: number | null;
-  }>({
-    atfTemp: null,
   });
 
   const [isLiveDataLoading, setIsLiveDataLoading] = useState(false);
@@ -363,47 +355,21 @@ export default function DiagnosticsScreen() {
     }
   }, [selectedParams]);
 
-  const fetchExtraSafetyWrapper = useCallback(async () => {
-    const safetyKeys = LIVE_PARAMS.filter((p) => p.category === 'safety' && selectedParams.has(p.id)).map((p) => p.id) as SafetyDataKey[];
-    if (safetyKeys.length === 0) return; // nothing multi-ECU selected — skip entirely, no ATSH switching at all
-
-    try {
-      const data = await getExtraSafetyData(safetyKeys);
-      setExtraSafetyData(data);
-    } catch (error) {
-      console.warn('Failed to fetch extra safety data:', error);
-    }
-  }, [selectedParams]);
-
-  // Poll live data with a single sequential loop instead of two independent
-  // setIntervals. This guarantees the slow (multi-ECU header-switching) request
-  // always runs to completion before the fast loop is allowed to send its next
-  // command — so ELM327 commands from the two cadences can never overlap or
-  // pile up in the queue, and the JS thread/ELM buffer can't get stuck.
+  // Poll engine live data only. Transmission/ATF is no longer part of any
+  // continuous loop — getExtraSafetyData is only invoked from the manual
+  // DTC Scanning flow in this file now.
   useEffect(() => {
     let cancelled = false;
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
     const FAST_INTERVAL_MS = 800;
-    const SLOW_INTERVAL_MS = 5000;
 
     const runPollLoop = async () => {
       if (cancelled) return;
       await fetchLiveDataWrapper(true);
-      if (cancelled) return;
-      await fetchExtraSafetyWrapper();
-      let lastSlowFetch = Date.now();
 
       const tick = async () => {
         if (cancelled) return;
         const tickStart = Date.now();
-
-        // Slow multi-ECU request takes priority: it fully completes (halting
-        // the fast loop) before any further fast-loop command is sent.
-        if (tickStart - lastSlowFetch >= SLOW_INTERVAL_MS) {
-          await fetchExtraSafetyWrapper();
-          lastSlowFetch = Date.now();
-          if (cancelled) return;
-        }
 
         await fetchLiveDataWrapper(false);
         if (cancelled) return;
@@ -424,7 +390,7 @@ export default function DiagnosticsScreen() {
       cancelled = true;
       if (pollTimeout) clearTimeout(pollTimeout);
     };
-  }, [activeView, liveDataMode, selectedParams, fetchLiveDataWrapper, fetchExtraSafetyWrapper]);
+  }, [activeView, liveDataMode, selectedParams, fetchLiveDataWrapper]);
 
   // Smooth Animation Trigger — animate toward 0 on a null/lost reading too
   // (instead of an instant setValue snap), so one missed poll doesn't jolt
@@ -495,8 +461,6 @@ export default function DiagnosticsScreen() {
   const actualMaf = connected ? liveData.maf : null;
   const actualO2 = connected ? liveData.o2 : null;
   const actualFuelTrim = connected ? liveData.fuelTrim : null;
-  
-  const actualAtfTemp = connected ? extraSafetyData.atfTemp : null;
 
 
   // ---------------------------------------------------------------------------
@@ -707,22 +671,6 @@ export default function DiagnosticsScreen() {
                   </View>
                 )}
 
-                {selectedParams.has('atfTemp') && (
-                  <LiveCard
-                    icon="cog-outline"
-                    tone={getAtfTempStatus(actualAtfTemp).tone}
-                    value={actualAtfTemp !== null ? actualAtfTemp.toFixed(0) : '--'}
-                    unit="°C"
-                    labelEn="Trans Temp"
-                    labelAr="حرارة الفتيس"
-                    statusEn={getAtfTempStatus(actualAtfTemp).statusEn}
-                    statusAr={getAtfTempStatus(actualAtfTemp).statusAr}
-                    isAr={isAr}
-                    dir={dir}
-                    isLoading={isLiveDataLoading}
-                    isWaiting={actualAtfTemp === null}
-                  />
-                )}
                 {selectedParams.has('coolant') && (
                   <LiveCard
                     icon="thermometer-outline"

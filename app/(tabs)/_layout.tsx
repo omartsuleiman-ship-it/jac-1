@@ -14,7 +14,7 @@ import { LiveDataKey, SafetyDataKey } from '../services/bleService';
 // this ELM327 can only reach the Engine (7E0) and Transmission (7E1) ECUs —
 // polling 7B0 (ABS) / 7A0 (TPMS) only produced NO DATA / timeouts.
 const WATCHDOG_LIVE_KEYS: LiveDataKey[] = ['coolant', 'voltage'];
-const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = ['atfTemp'];
+const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = [];
 
 // ضبط إعدادات الإشعارات للتوافق مع الإصدارات الحديثة
 Notifications.setNotificationHandler({
