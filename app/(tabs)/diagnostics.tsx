@@ -20,7 +20,7 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
+import { getEngineDTCs, getExtraSafetyData, getLiveData, getMisfireCounters, getReadiness, getTransmissionDTCs, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
 import { fetchDTCFromAI } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
@@ -186,6 +186,7 @@ export default function DiagnosticsScreen() {
 
   // --- SCANNER state ---
   const [isScanning, setIsScanning] = useState(false);
+  const [scanTarget, setScanTarget] = useState<'engine' | 'transmission' | null>(null);
   const [faults, setFaults] = useState<FaultItem[] | null>(null);
   const scanIdRef = useRef(0);
 
@@ -293,13 +294,14 @@ export default function DiagnosticsScreen() {
     }
   };
 
-  const handleScan = async () => {
+  const runScan = async (target: 'engine' | 'transmission') => {
     const thisScan = ++scanIdRef.current;
     setIsScanning(true);
+    setScanTarget(target);
     setFaults(null);
 
     try {
-      const foundItems = await getDTCs();
+      const foundItems = target === 'engine' ? await getEngineDTCs() : await getTransmissionDTCs();
       if (scanIdRef.current !== thisScan) return;
 
       const initialFaults: FaultItem[] = foundItems.map((item) => {
@@ -312,7 +314,7 @@ export default function DiagnosticsScreen() {
 
       setFaults(initialFaults);
       initialFaults.filter((f) => f.status === 'loading').forEach((f) => resolveFaultCode(f.code, f.module, thisScan));
-      
+
       // السطر ده عشان يحفظ الأعطال وتسمّع في الشاشة الرئيسية بره
       AsyncStorage.setItem('@stored_faults', JSON.stringify(initialFaults)).catch(() => {});
     } catch (error) {
@@ -320,6 +322,7 @@ export default function DiagnosticsScreen() {
       Alert.alert('Error', isAr ? 'فشل الفحص' : 'Scan failed');
     } finally {
       setIsScanning(false);
+      setScanTarget(null);
     }
   };
 
@@ -504,26 +507,45 @@ export default function DiagnosticsScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {activeView === 'SCANNER' && (
           <View>
-            <TouchableOpacity
-              style={[styles.scanButton, isScanning && styles.scanButtonDisabled]}
-              onPress={handleScan}
-              disabled={isScanning}
-              activeOpacity={0.85}
-            >
-              {isScanning ? (
-                <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                  <ActivityIndicator color="#0B0D10" />
-                  <Text style={styles.scanButtonText}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
-                </View>
-              ) : (
-                <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                  <Ionicons name="scan-outline" size={20} color="#0B0D10" />
-                  <Text style={styles.scanButtonText}>
-                    {isAr ? 'فحص شامل لجميع كنترولات السيارة' : 'Full Multi-ECU Vehicle Scan'}
-                  </Text>
-                </View>
-              )}
-            </TouchableOpacity>
+            <View style={[styles.scanButtonRow2, { flexDirection: dir }]}>
+              <TouchableOpacity
+                style={[styles.scanButtonHalf, isScanning && styles.scanButtonDisabled]}
+                onPress={() => runScan('engine')}
+                disabled={isScanning}
+                activeOpacity={0.85}
+              >
+                {isScanning && scanTarget === 'engine' ? (
+                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                    <ActivityIndicator color="#0B0D10" />
+                    <Text style={styles.scanButtonText}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
+                  </View>
+                ) : (
+                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                    <Ionicons name="cog-outline" size={20} color="#0B0D10" />
+                    <Text style={styles.scanButtonText}>{isAr ? 'فحص الموتور' : 'Scan Engine'}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.scanButtonHalf, styles.scanButtonHalfSecondary, isScanning && styles.scanButtonDisabled]}
+                onPress={() => runScan('transmission')}
+                disabled={isScanning}
+                activeOpacity={0.85}
+              >
+                {isScanning && scanTarget === 'transmission' ? (
+                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                    <ActivityIndicator color={COLORS.textPrimary} />
+                    <Text style={[styles.scanButtonText, { color: COLORS.textPrimary }]}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
+                  </View>
+                ) : (
+                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                    <Ionicons name="build-outline" size={20} color={COLORS.textPrimary} />
+                    <Text style={[styles.scanButtonText, { color: COLORS.textPrimary }]}>{isAr ? 'فحص الفتيس' : 'Scan Transmission'}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
 
             {faults !== null && (
               <View style={[styles.resultsBar, { flexDirection: dir }]}>
@@ -1331,6 +1353,28 @@ const styles = StyleSheet.create({
   scanButtonDisabled: { opacity: 0.8 },
   scanButtonRow: { alignItems: 'center', gap: 8 },
   scanButtonText: { color: '#0B0D10', fontSize: 15.5, fontWeight: '800' },
+
+  scanButtonRow2: { gap: 10, marginBottom: 16 },
+  scanButtonHalf: {
+    flex: 1,
+    backgroundColor: COLORS.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 17,
+    borderRadius: 16,
+    shadowColor: COLORS.accent,
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
+  },
+  scanButtonHalfSecondary: {
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.cardBorder,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
 
   resultsBar: { alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, paddingHorizontal: 2 },
   resultsBarLeft: { alignItems: 'center', gap: 10 },

@@ -510,29 +510,37 @@ const byteToDTC = (b1: number, b2: number): string | null => {
 
 // ── High-level OBD functions ──
 
-export const getDTCs = async (): Promise<{ code: string; module: string }[]> => {
-  const targets = [
-    { header: '7E0', name: 'Engine Control Module (ECM)' },
-    { header: '7E1', name: 'Transmission Control Module (TCM)' },
-    { header: '7B0', name: 'Anti-lock Braking System (ABS)' },
-    { header: '780', name: 'Supplemental Restraint System (Airbags)' },
-    { header: '7A0', name: 'Tire Pressure Monitor (TPMS)' },
-  ];
+export const getEngineDTCs = async (): Promise<{ code: string; module: string }[]> => {
+  try {
+    await sendOBDCommand('ATSH7E0', 500);
+    const response = await sendOBDCommand('03', 1500);
+    return parseDTCs(response).map((code) => ({ code, module: 'Engine Control Module (ECM)' }));
+  } catch (error) {
+    console.warn('[BLE] Engine DTC scan failed:', error);
+    return [];
+  }
+};
 
-  const allCodes: { code: string; module: string }[] = [];
-
-  for (const target of targets) {
+export const getTransmissionDTCs = async (): Promise<{ code: string; module: string }[]> => {
+  try {
+    await sendOBDCommand('ATSH7E1', 500);
+    const response = await sendOBDCommand('03', 1500);
+    return parseDTCs(response).map((code) => ({ code, module: 'Transmission Control Module (TCM)' }));
+  } catch (error) {
+    console.warn('[BLE] Transmission DTC scan failed:', error);
+    return [];
+  } finally {
+    // CRITICAL: this is the only ECU switch here that doesn't already rest
+    // on 7E0. GlobalSafetyWatchdog and the Live Data RPM polling loop both
+    // assume the header is back on Engine — skipping this reset (or letting
+    // an exception above skip it) would silently break both after every
+    // transmission scan.
     try {
-      await sendOBDCommand(`ATSH${target.header}`, 500);
-      const response = await sendOBDCommand('03', 1500);
-      const codes = parseDTCs(response);
-      codes.forEach((code) => allCodes.push({ code, module: target.name }));
+      await sendOBDCommand('ATSH7E0', 500);
     } catch (error) {
-      console.warn(`[BLE] No response or failed fetch from ${target.name}`);
+      console.warn('[BLE] Failed to reset header to 7E0 after transmission scan:', error);
     }
   }
-  await sendOBDCommand('ATSH7E0', 500);
-  return allCodes;
 };
 
 export type LiveDataKey = 'rpm' | 'coolant' | 'voltage' | 'engineLoad' | 'maf' | 'o2' | 'fuelTrim';
