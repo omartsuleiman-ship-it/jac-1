@@ -294,11 +294,23 @@ export default function DiagnosticsScreen() {
     }
   };
 
-  const runScan = async (target: 'engine' | 'transmission') => {
+    const runScan = async (target: 'engine' | 'transmission') => {
+    // Guard lives here, not in each button's onPress — this way it's
+    // impossible to add a future entry point to runScan() and forget the
+    // check. Returns immediately, before touching isScanning/faults at all,
+    // so the UI never flashes a false "0 faults" / green shield state.
+    if (!isConnected()) {
+      Alert.alert(
+        isAr ? 'غير متصل' : 'Not Connected',
+        isAr ? 'من فضلك اتصل بجهاز الـ OBD أولاً' : 'Please connect to the OBD dongle first'
+      );
+      return;
+    }
+
     const thisScan = ++scanIdRef.current;
     setIsScanning(true);
     setScanTarget(target);
-    setFaults(null);
+    setFaults(null); // clear any previous results/'\''0 faults'\'' message immediately, before the real result arrives
 
     try {
       const foundItems = target === 'engine' ? await getEngineDTCs() : await getTransmissionDTCs();
@@ -507,45 +519,34 @@ export default function DiagnosticsScreen() {
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {activeView === 'SCANNER' && (
           <View>
-            <View style={[styles.scanButtonRow2, { flexDirection: dir }]}>
-              <TouchableOpacity
-                style={[styles.scanButtonHalf, isScanning && styles.scanButtonDisabled]}
-                onPress={() => runScan('engine')}
-                disabled={isScanning}
-                activeOpacity={0.85}
-              >
-                {isScanning && scanTarget === 'engine' ? (
-                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                    <ActivityIndicator color="#0B0D10" />
-                    <Text style={styles.scanButtonText}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
-                  </View>
-                ) : (
-                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                    <Ionicons name="cog-outline" size={20} color="#0B0D10" />
-                    <Text style={styles.scanButtonText}>{isAr ? 'فحص الموتور' : 'Scan Engine'}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.scanButtonHalf, styles.scanButtonHalfSecondary, isScanning && styles.scanButtonDisabled]}
-                onPress={() => runScan('transmission')}
-                disabled={isScanning}
-                activeOpacity={0.85}
-              >
-                {isScanning && scanTarget === 'transmission' ? (
-                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                    <ActivityIndicator color={COLORS.textPrimary} />
-                    <Text style={[styles.scanButtonText, { color: COLORS.textPrimary }]}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
-                  </View>
-                ) : (
-                  <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
-                    <Ionicons name="build-outline" size={20} color={COLORS.textPrimary} />
-                    <Text style={[styles.scanButtonText, { color: COLORS.textPrimary }]}>{isAr ? 'فحص الفتيس' : 'Scan Transmission'}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            </View>
+            <TouchableOpacity
+              style={[styles.scanButton, isScanning && styles.scanButtonDisabled]}
+              onPress={() => {
+                Alert.alert(
+                  isAr ? 'اختر الكنترول' : 'Choose Module',
+                  isAr ? 'تحب تفحص إيه؟' : 'What would you like to scan?',
+                  [
+                    { text: isAr ? 'الموتور' : 'Engine', onPress: () => runScan('engine') },
+                    { text: isAr ? 'الفتيس' : 'Transmission', onPress: () => runScan('transmission') },
+                    { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+                  ]
+                );
+              }}
+              disabled={isScanning}
+              activeOpacity={0.85}
+            >
+              {isScanning ? (
+                <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                  <ActivityIndicator color="#0B0D10" />
+                  <Text style={styles.scanButtonText}>{isAr ? 'جاري الفحص...' : 'Scanning...'}</Text>
+                </View>
+              ) : (
+                <View style={[styles.scanButtonRow, { flexDirection: dir }]}>
+                  <Ionicons name="scan-outline" size={20} color="#0B0D10" />
+                  <Text style={styles.scanButtonText}>{isAr ? 'فحص الأعطال' : 'Start Scan'}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
 
             {faults !== null && (
               <View style={[styles.resultsBar, { flexDirection: dir }]}>
@@ -1354,27 +1355,6 @@ const styles = StyleSheet.create({
   scanButtonRow: { alignItems: 'center', gap: 8 },
   scanButtonText: { color: '#0B0D10', fontSize: 15.5, fontWeight: '800' },
 
-  scanButtonRow2: { gap: 10, marginBottom: 16 },
-  scanButtonHalf: {
-    flex: 1,
-    backgroundColor: COLORS.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 17,
-    borderRadius: 16,
-    shadowColor: COLORS.accent,
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 4,
-  },
-  scanButtonHalfSecondary: {
-    backgroundColor: COLORS.card,
-    borderWidth: 1,
-    borderColor: COLORS.cardBorder,
-    shadowOpacity: 0,
-    elevation: 0,
-  },
 
   resultsBar: { alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, paddingHorizontal: 2 },
   resultsBarLeft: { alignItems: 'center', gap: 10 },
