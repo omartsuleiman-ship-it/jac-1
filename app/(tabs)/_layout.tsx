@@ -4,7 +4,7 @@ import * as Notifications from 'expo-notifications';
 import { Tabs } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
-import { getExtraSafetyData, getLiveData, isConnected, LiveDataKey, SafetyDataKey } from '../services/bleService';
+import { LiveDataKey, SafetyDataKey } from '../services/bleService';
 
 // The watchdog always monitors this fixed critical set, independent of
 // whatever the user has chosen to display on the diagnostics dashboard —
@@ -227,15 +227,7 @@ function GlobalSafetyWatchdog() {
     };
 
     const runCheck = async () => {
-      if (!isConnected()) return;
-      try {
-        const live = await getLiveData(WATCHDOG_LIVE_KEYS);
-        const extra = await getExtraSafetyData(WATCHDOG_SAFETY_KEYS);
-
-        checkMetric('coolant', live.coolant, (v: number) => (v > 115 ? { tone: 'danger' } : v >= 106 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة المحرك', 'Engine Temp', `${live.coolant}°C`);
-        checkMetric('atf', extra.atfTemp, (v: number) => (v > 110 ? { tone: 'danger' } : v > 90 ? { tone: 'warning' } : { tone: 'success' }), 'حرارة الفتيس', 'Trans Temp', `${extra.atfTemp}°C`);
-        checkMetric('volt', live.voltage, (v: number) => (v < 11.5 || v > 15.0 ? { tone: 'danger' } : v < 13.3 ? { tone: 'warning' } : { tone: 'success' }), 'جهد البطارية', 'Battery Voltage', `${live.voltage}V`);
-      } catch (e) {}
+      return; // 🚫 تم إيقاف المراقب مؤقتاً لاختبار استقرار اللايف داتا
     };
 
     const interval = setInterval(runCheck, 10000);
