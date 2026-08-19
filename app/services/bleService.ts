@@ -187,10 +187,23 @@ const queueRawCommand = (command: string, timeoutMs = 2000): Promise<string> => 
   });
 };
 
+// ── Small delay helper — used ONLY where a specific ELM327 quirk needs it,
+// never as a blanket "just in case" pause between every command. The queue
+// already serializes commands correctly by waiting for the '>' prompt (or a
+// timeout) before sending the next one, so most commands need no extra delay.
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // ── ELM327 init sequence: reset, echo off, linefeeds off, auto-detect protocol ──
 const initializeELM327 = async () => {
   try {
     await queueRawCommand('ATZ', 3000);
+    // ATZ resets the adapter's own MCU. Many cheap clones send back the '>'
+    // prompt before their internal parser has actually finished settling
+    // post-reset — accepting the next command too early is a well-known
+    // real-world cause of a clone appearing to freeze (LEDs stop, no further
+    // replies) even though the app's queue did everything right. This is the
+    // one place a fixed delay is genuinely justified.
+    await delay(300);
     await queueRawCommand('ATE0');
     await queueRawCommand('ATL0');
     await queueRawCommand('ATSP0');
@@ -340,7 +353,7 @@ export const setOBDDevice = async (device: Device) => {
   await device.discoverAllServicesAndCharacteristics();
   try {
     const { writeChar, notifyChar } = await discoverOBDCharacteristic(device);
-    if (!writeChar || !notifyChar) {
+        if (!writeChar || !notifyChar) {
       console.error('[BLE] Missing write and/or notify characteristic on this device');
       Alert.alert('BLE Char Error', 'No notifiable/writable characteristic found');
       return;
@@ -351,7 +364,10 @@ export const setOBDDevice = async (device: Device) => {
     console.log(
       `[BLE] Write=${writeChar.uuid} Notify=${notifyChar.uuid}, writeWithoutResponse=${writeWithoutResponseMode}`
     );
-    Alert.alert('BLE Success', `Write: ${writeChar.uuid}\nNotify: ${notifyChar.uuid}`);
+    // Removed the debug Alert.alert('BLE Success', ...) that used to fire
+    // on every connection — leftover from early development, and popping a
+    // native modal on every connect is exactly the kind of thing that reads
+    // as a freeze. Use the console.log above / [BLE] tags for debugging.
     responseBuffer = '';
     startNotifyListener();
     await initializeELM327();
