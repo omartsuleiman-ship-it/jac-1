@@ -98,6 +98,15 @@ let disconnectSubscription: { remove: () => void } | null = null;
 let responseBuffer = '';
 let notifySubscription: { remove: () => void } | null = null;
 
+// ── Atomic Transaction Lock: protects an entire multi-command header-switch
+// SEQUENCE (e.g. ATSH7E1 -> request -> ATSH7E0), not just one command. The
+// command queue below already guarantees no two commands are ever in flight
+// at once, but it does NOT stop an unrelated caller (like the fast RPM
+// interval) from queuing its OWN command in the gap between two awaited
+// commands inside a sequence — which is exactly how a live-data PID could
+// get sent while the header is still pointed at a non-engine ECU. ──
+let isSequenceActive = false;
+
 // ── Command Queue: ELM327 is half-duplex, only one command may be in flight at a time ──
 interface QueuedCommand {
   command: string;
@@ -511,6 +520,7 @@ const byteToDTC = (b1: number, b2: number): string | null => {
 // ── High-level OBD functions ──
 
 export const getEngineDTCs = async (): Promise<{ code: string; module: string }[]> => {
+  isSequenceActive = true;
   try {
     await sendOBDCommand('ATSH7E0', 500);
     const response = await sendOBDCommand('03', 1500);
@@ -518,10 +528,17 @@ export const getEngineDTCs = async (): Promise<{ code: string; module: string }[
   } catch (error) {
     console.warn('[BLE] Engine DTC scan failed:', error);
     return [];
+  } finally {
+    // This scan never actually leaves 7E0, so the lock isn't protecting
+    // against a stale header here — it's protecting against getLiveData
+    // firing its OWN un-headered '010C' etc. mid-scan and getting tangled
+    // in the same response buffer as this scan's '03' request.
+    isSequenceActive = false;
   }
 };
 
 export const getTransmissionDTCs = async (): Promise<{ code: string; module: string }[]> => {
+  isSequenceActive = true;
   try {
     await sendOBDCommand('ATSH7E1', 500);
     const response = await sendOBDCommand('03', 1500);
@@ -534,18 +551,28 @@ export const getTransmissionDTCs = async (): Promise<{ code: string; module: str
     // on 7E0. GlobalSafetyWatchdog and the Live Data RPM polling loop both
     // assume the header is back on Engine — skipping this reset (or letting
     // an exception above skip it) would silently break both after every
-    // transmission scan.
+    // transmission scan. The reset happens BEFORE the lock is released, same
+    // pattern as getExtraSafetyData.
     try {
       await sendOBDCommand('ATSH7E0', 500);
     } catch (error) {
       console.warn('[BLE] Failed to reset header to 7E0 after transmission scan:', error);
     }
+    isSequenceActive = false;
   }
 };
 
 export type LiveDataKey = 'rpm' | 'coolant' | 'voltage' | 'engineLoad' | 'maf' | 'o2' | 'fuelTrim';
 
 export const getLiveData = async (selectedKeys: LiveDataKey[]) => {
+  // Another module (Transmission scan, ATF probe) owns the header right now.
+  // Queuing an engine PID here would send it to whatever ECU that sequence
+  // currently has selected — silently skip this polling tick instead. Costs
+  // nothing: no command is queued, so no timeout, no wasted bandwidth.
+  if (isSequenceActive) {
+    return { rpm: null, coolant: null, voltage: 0, engineLoad: null, maf: 0, o2: null, fuelTrim: null };
+  }
+
   const want = (key: LiveDataKey) => selectedKeys.includes(key);
 
   const safeRequest = async (pid: string): Promise<number | null> => {
@@ -810,30 +837,33 @@ export const getExtraSafetyData = async (selectedKeys: SafetyDataKey[]) => {
     targets.push({ header: '7E1', request: '222001', label: 'Transmission (ATF temp)', key: 'atfTemp' });
   }
 
+  if (targets.length === 0) {
+    return { atfTemp }; // nothing to probe — never take the lock for no reason
+  }
+
+  // Locked from BEFORE the first header switch to AFTER the final reset —
+  // getLiveData checks this flag and queues nothing while it's true, so no
+  // engine PID can land on the Transmission ECU mid-sequence.
+  isSequenceActive = true;
   try {
-    // SEQUENTIAL, not Promise.all. ATSH/ATCRA are global adapter state, not
-    // per-request — running probes "concurrently" let one ECU's commands
-    // interleave with another's in the shared queue, so a request could fire
-    // after a different probe had already overwritten the header. Running
-    // them one at a time keeps each ECU's full header->filter->request->clear
-    // sequence atomic, which is the actual fix for every parameter returning
-    // null once more than one non-engine ECU was selected.
+    // SEQUENTIAL, not Promise.all — see prior note: ATSH/ATCRA are global
+    // adapter state, so probes must run one at a time even within this
+    // single locked transaction.
     for (const target of targets) {
       await querySafetyECU(target.header, target.request, target.label);
       // Parsing logic for ATF goes here once we confirm JAC's exact hex
       // format from the [BLE] raw response logs — result.raw holds it.
     }
   } finally {
-    // Always reset to the Engine ECU header, even if a probe above threw
-    // unexpectedly — guarantees the next engine-PID poll never inherits a
-    // stale non-engine header or receive filter.
-    if (targets.length > 0) {
-      try {
-        await sendOBDCommand('ATSH7E0', 300);
-      } catch (error) {
-        console.warn('[BLE] Failed to reset header to 7E0:', error);
-      }
+    // Mandatory reset — happens INSIDE the lock, before it's released, so no
+    // other caller can observe a state where the header isn't back on 7E0
+    // yet but the lock has already been lifted.
+    try {
+      await sendOBDCommand('ATSH7E0', 300);
+    } catch (error) {
+      console.warn('[BLE] Failed to reset header to 7E0:', error);
     }
+    isSequenceActive = false;
   }
 
   return { atfTemp };
