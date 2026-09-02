@@ -55,7 +55,7 @@ export default function RadarScreen() {
   // عشرات عمليات إعادة رسم متلاحقة تقفل التطبيق.
   const handleRegionChangeComplete = useCallback((r: Region) => {
     if (regionUpdateTimer.current) clearTimeout(regionUpdateTimer.current);
-    regionUpdateTimer.current = setTimeout(() => setRegion(r), 200);
+    regionUpdateTimer.current = setTimeout(() => setRegion(r), 400);
   }, []);
 
   useEffect(() => {
@@ -167,11 +167,13 @@ export default function RadarScreen() {
     () =>
       clusters.map((c) =>
         c.count > 1 ? (
-          <Marker key={c.id} coordinate={{ latitude: c.latitude, longitude: c.longitude }} tracksViewChanges={false}>
-            <View style={styles.clusterBadge}>
-              <Text style={styles.clusterText}>{c.count}</Text>
-            </View>
-          </Marker>
+          <Marker
+            key={c.id}
+            coordinate={{ latitude: c.latitude, longitude: c.longitude }}
+            pinColor="#000000"
+            title={`${c.count} radars`}
+            tracksViewChanges={false}
+          />
         ) : (
           <Marker
             key={c.id}

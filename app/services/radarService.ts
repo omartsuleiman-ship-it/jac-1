@@ -137,7 +137,7 @@ export const clusterPois = (
 ): RadarCluster[] => {
   // سقف صارم لعدد الماركرز الكاستوم (اللي فيها View مش pin عادي) اللي
   // بيترسموا مرة واحدة — ده اللي كان بيفجّر التطبيق عند الزوم أوت السريع.
-  const MAX_CLUSTERS = 60;
+  const MAX_CLUSTERS = 40;
 
   const margin = 0.25;
   const minLat = region.latitude - (region.latitudeDelta / 2) * (1 + margin);
