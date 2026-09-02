@@ -227,18 +227,29 @@ function useRadarEngine() {
     let cancelled = false;
 
     (async () => {
-      const fg = await Location.requestForegroundPermissionsAsync();
+      // Check BEFORE requesting on both permissions. On iOS in particular,
+      // calling request*PermissionsAsync() when the permission is already
+      // granted at "Always" can stall or behave unreliably instead of just
+      // resolving immediately — checking first sidesteps that entirely and
+      // is also just correct behavior (never re-prompt for what you already have).
+      let fgStatus = (await Location.getForegroundPermissionsAsync()).status;
+      if (fgStatus !== 'granted') {
+        fgStatus = (await Location.requestForegroundPermissionsAsync()).status;
+      }
       if (cancelled) return;
-      setForegroundPermissionGranted(fg.status === 'granted');
-      if (fg.status !== 'granted') return;
+      setForegroundPermissionGranted(fgStatus === 'granted');
+      if (fgStatus !== 'granted') return;
 
-      // Background permission is a SEPARATE prompt from foreground on both
+      // Background permission is a SEPARATE grant from foreground on both
       // platforms (iOS: "Change to Always Allow" follow-up; Android 10+: a
       // second system dialog). Must be granted for updates to keep arriving
-      // with the screen off / app backgrounded.
-      const bg = await Location.requestBackgroundPermissionsAsync();
+      // with the screen off / app backgrounded. Same check-before-request pattern.
+      let bgStatus = (await Location.getBackgroundPermissionsAsync()).status;
+      if (bgStatus !== 'granted') {
+        bgStatus = (await Location.requestBackgroundPermissionsAsync()).status;
+      }
       if (cancelled) return;
-      setBackgroundPermissionGranted(bg.status === 'granted');
+      setBackgroundPermissionGranted(bgStatus === 'granted');
 
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (alreadyRunning) return;
