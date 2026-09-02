@@ -37,6 +37,7 @@ export default function RadarScreen() {
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const mapRef = useRef<MapView>(null);
 
+  const regionUpdateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [allPois, setAllPois] = useState<RadarPoi[]>([]);
   const [region, setRegion] = useState<Region>({
     latitude: location?.coords.latitude ?? 30.0444,
@@ -48,6 +49,13 @@ export default function RadarScreen() {
   const loadAllPois = useCallback(async () => {
     const userPois = await loadUserPois();
     setAllPois([...getStaticPois(), ...userPois]);
+  }, []);
+
+  // تأخير بسيط قبل إعادة حساب الكلاسترز — عشان الحركة/الزوم السريع ميعملش
+  // عشرات عمليات إعادة رسم متلاحقة تقفل التطبيق.
+  const handleRegionChangeComplete = useCallback((r: Region) => {
+    if (regionUpdateTimer.current) clearTimeout(regionUpdateTimer.current);
+    regionUpdateTimer.current = setTimeout(() => setRegion(r), 200);
   }, []);
 
   useEffect(() => {
@@ -187,8 +195,8 @@ export default function RadarScreen() {
         showsUserLocation={false}
         showsMyLocationButton
         showsCompass
-        onLongPress={handleLongPress}
-        onRegionChangeComplete={setRegion}
+         onLongPress={handleLongPress}
+        onRegionChangeComplete={handleRegionChangeComplete}
       >
         {markers}
         {location && (

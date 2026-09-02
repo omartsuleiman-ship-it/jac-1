@@ -135,6 +135,10 @@ export const clusterPois = (
   pois: RadarPoi[],
   region: { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number }
 ): RadarCluster[] => {
+  // سقف صارم لعدد الماركرز الكاستوم (اللي فيها View مش pin عادي) اللي
+  // بيترسموا مرة واحدة — ده اللي كان بيفجّر التطبيق عند الزوم أوت السريع.
+  const MAX_CLUSTERS = 60;
+
   const margin = 0.25;
   const minLat = region.latitude - (region.latitudeDelta / 2) * (1 + margin);
   const maxLat = region.latitude + (region.latitudeDelta / 2) * (1 + margin);
@@ -145,30 +149,42 @@ export const clusterPois = (
     (p) => p.latitude >= minLat && p.latitude <= maxLat && p.longitude >= minLon && p.longitude <= maxLon
   );
 
-  const cellSize = region.latitudeDelta / 20;
-  if (!cellSize || cellSize <= 0) {
-    return visible.map((p) => ({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p }));
-  }
+  let divisor = 20;
+  let result: RadarCluster[] = [];
 
-  const cells = new Map<string, RadarPoi[]>();
-  for (const p of visible) {
-    const key = `${Math.floor(p.latitude / cellSize)}:${Math.floor(p.longitude / cellSize)}`;
-    const bucket = cells.get(key);
-    if (bucket) bucket.push(p);
-    else cells.set(key, [p]);
-  }
-
-  const clusters: RadarCluster[] = [];
-  cells.forEach((bucket, key) => {
-    if (bucket.length === 1) {
-      const p = bucket[0];
-      clusters.push({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p });
-    } else {
-      const avgLat = bucket.reduce((sum, p) => sum + p.latitude, 0) / bucket.length;
-      const avgLon = bucket.reduce((sum, p) => sum + p.longitude, 0) / bucket.length;
-      clusters.push({ id: `cluster-${key}`, latitude: avgLat, longitude: avgLon, count: bucket.length });
+  // لو عدد الكلاسترز زاد عن السقف، نكبّر حجم الخلية (نقلل الدقة) ونعيد
+  // المحاولة — لحد ما نوصل لعدد آمن نرسمه، بدل ما نرسمهم كلهم زي ما هم.
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const cellSize = region.latitudeDelta / divisor;
+    if (!cellSize || cellSize <= 0) {
+      result = visible.map((p) => ({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p }));
+      break;
     }
-  });
 
-  return clusters;
+    const cells = new Map<string, RadarPoi[]>();
+    for (const p of visible) {
+      const key = `${Math.floor(p.latitude / cellSize)}:${Math.floor(p.longitude / cellSize)}`;
+      const bucket = cells.get(key);
+      if (bucket) bucket.push(p);
+      else cells.set(key, [p]);
+    }
+
+    const clusters: RadarCluster[] = [];
+    cells.forEach((bucket, key) => {
+      if (bucket.length === 1) {
+        const p = bucket[0];
+        clusters.push({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p });
+      } else {
+        const avgLat = bucket.reduce((sum, p) => sum + p.latitude, 0) / bucket.length;
+        const avgLon = bucket.reduce((sum, p) => sum + p.longitude, 0) / bucket.length;
+        clusters.push({ id: `cluster-${key}-${divisor}`, latitude: avgLat, longitude: avgLon, count: bucket.length });
+      }
+    });
+
+    result = clusters;
+    if (result.length <= MAX_CLUSTERS) break;
+    divisor = Math.max(2, Math.floor(divisor / 2)); // نقلل دقة الشبكة ونحاول تاني
+  }
+
+  return result;
 };
