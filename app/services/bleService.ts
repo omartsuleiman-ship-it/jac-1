@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { Alert } from 'react-native';
-import { Characteristic, Device } from 'react-native-ble-plx';
+import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 
 // ── BLE Manager ──
 // restoreStateIdentifier is what actually lets iOS relaunch/reattach this app
@@ -10,7 +10,6 @@ import { Characteristic, Device } from 'react-native-ble-plx';
 // mechanism the bluetooth-central mode is meant to pair with.
 const BLE_RESTORE_STATE_ID = 'jac-obd-central-manager';
 
-/*
 export const bleManager = new BleManager({
   restoreStateIdentifier: BLE_RESTORE_STATE_ID,
   restoreStateFunction: (restoredState) => {
@@ -27,9 +26,6 @@ export const bleManager = new BleManager({
     }
   },
 });
-*/
-
-export const bleManager: any = null;
 
 // ── OBD-II Service & Characteristic UUIDs ──
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';

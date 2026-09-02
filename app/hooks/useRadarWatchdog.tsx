@@ -243,8 +243,7 @@ function useRadarEngine() {
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (alreadyRunning) return;
 
-     /*
-    await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
+     await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
       accuracy: Location.Accuracy.BestForNavigation,
       timeInterval: LOCATION_TIME_INTERVAL_MS,
       distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
@@ -257,8 +256,6 @@ function useRadarEngine() {
         notificationBody: 'Tracking your location for speed camera alerts.',
       },
     });
-    */
-    console.log("Radar bypassed for Expo Go");
     })();
 
     // Deliberately NOT stopping updates on unmount — the entire point of
