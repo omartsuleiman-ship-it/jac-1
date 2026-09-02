@@ -16,8 +16,12 @@
         "NSBluetoothAlwaysUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
         "NSBluetoothPeripheralUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
         "UIBackgroundModes": [
-          "bluetooth-central"
-        ]
+          "bluetooth-central",
+          "location",
+          "audio"
+        ],
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app tracks your location in the background to alert you about nearby speed cameras, even when the screen is off.",
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to show nearby speed cameras and your current speed."
       }
     },
     "android": {
@@ -34,7 +38,10 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION"
       ],
       "package": "com.anonymous.jac"
     },
@@ -76,7 +83,9 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to save your car's parked location when the OBD dongle disconnects."
+          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to save your car's parked location and alert you about nearby speed cameras, even in the background.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ]
     ],
