@@ -1,9 +1,17 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRadar } from '../hooks/useRadarWatchdog';
-import { RadarPoi, RadarPoiType, deleteUserPoi, saveUserPoi } from '../services/radarService';
+import {
+  RadarPoi,
+  RadarPoiType,
+  clusterPois,
+  deleteUserPoi,
+  getStaticPois,
+  loadUserPois,
+  saveUserPoi
+} from '../services/radarService';
 import { COLORS, useLang } from './_layout';
 
 const PIN_COLORS: Record<RadarPoiType, string> = {
@@ -16,7 +24,6 @@ export default function RadarScreen() {
   const { isAr } = useLang();
   const {
     location,
-    nearbyPois,
     foregroundPermissionGranted,
     backgroundPermissionGranted,
     smartAlertsEnabled,
@@ -29,6 +36,23 @@ export default function RadarScreen() {
   const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const mapRef = useRef<MapView>(null);
+
+  const [allPois, setAllPois] = useState<RadarPoi[]>([]);
+  const [region, setRegion] = useState<Region>({
+    latitude: location?.coords.latitude ?? 30.0444,
+    longitude: location?.coords.longitude ?? 31.2357,
+    latitudeDelta: 0.05,
+    longitudeDelta: 0.05,
+  });
+
+  const loadAllPois = useCallback(async () => {
+    const userPois = await loadUserPois();
+    setAllPois([...getStaticPois(), ...userPois]);
+  }, []);
+
+  useEffect(() => {
+    loadAllPois();
+  }, [loadAllPois]);
 
   const speedKmh =
     location?.coords.speed && location.coords.speed > 0 ? Math.round(location.coords.speed * 3.6) : 0;
@@ -60,6 +84,7 @@ export default function RadarScreen() {
       try {
         await saveUserPoi(poi);
         await refreshPois(); // pulls the new pin onto the map immediately
+        await loadAllPois();
       } catch (error) {
         Alert.alert(isAr ? 'خطأ' : 'Error', isAr ? 'تعذر حفظ النقطة' : 'Failed to save the point');
       }
@@ -68,7 +93,7 @@ export default function RadarScreen() {
       setCommentText('');
       setPendingCoords(null);
     },
-    [pendingCoords, refreshPois, isAr]
+    [pendingCoords, refreshPois, loadAllPois, isAr]
   );
 
   const handleOpenCommentInput = useCallback(() => {
@@ -96,12 +121,13 @@ export default function RadarScreen() {
             onPress: async () => {
               await deleteUserPoi(poi.id);
               await refreshPois();
+              await loadAllPois();
             },
           },
         ]
       );
     },
-    [isAr, refreshPois]
+    [isAr, refreshPois, loadAllPois]
   );
 
   const handleRecenter = useCallback(() => {
@@ -127,18 +153,28 @@ export default function RadarScreen() {
     [isAr]
   );
 
+  const clusters = useMemo(() => clusterPois(allPois, region), [allPois, region]);
+
   const markers = useMemo(
     () =>
-      nearbyPois.map((poi) => (
-        <Marker
-          key={poi.id}
-          coordinate={{ latitude: poi.latitude, longitude: poi.longitude }}
-          pinColor={PIN_COLORS[poi.type]}
-          title={poiLabel(poi)}
-          onCalloutPress={() => handleDeletePoi(poi)}
-        />
-      )),
-    [nearbyPois, poiLabel, handleDeletePoi]
+      clusters.map((c) =>
+        c.count > 1 ? (
+          <Marker key={c.id} coordinate={{ latitude: c.latitude, longitude: c.longitude }} tracksViewChanges={false}>
+            <View style={styles.clusterBadge}>
+              <Text style={styles.clusterText}>{c.count}</Text>
+            </View>
+          </Marker>
+        ) : (
+          <Marker
+            key={c.id}
+            coordinate={{ latitude: c.poi!.latitude, longitude: c.poi!.longitude }}
+            pinColor={PIN_COLORS[c.poi!.type]}
+            title={poiLabel(c.poi!)}
+            onCalloutPress={() => handleDeletePoi(c.poi!)}
+          />
+        )
+      ),
+    [clusters, poiLabel, handleDeletePoi]
   );
 
   return (
@@ -148,13 +184,24 @@ export default function RadarScreen() {
         style={StyleSheet.absoluteFillObject}
         initialRegion={initialRegion}
         mapType="hybrid"
-        showsUserLocation
+        showsUserLocation={false}
         showsMyLocationButton
         showsCompass
-        {...({ showsUserHeading: true } as any)}
         onLongPress={handleLongPress}
+        onRegionChangeComplete={setRegion}
       >
         {markers}
+        {location && (
+          <Marker
+            coordinate={{ latitude: location.coords.latitude, longitude: location.coords.longitude }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            flat
+            rotation={location.coords.heading != null && location.coords.heading >= 0 ? location.coords.heading : 0}
+            tracksViewChanges={false}
+          >
+            <Ionicons name="navigate" size={30} color="#00D9C6" />
+          </Marker>
+        )}
       </MapView>
 
       <Pressable style={styles.recenterButton} onPress={handleRecenter}>
@@ -369,5 +416,20 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  clusterBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clusterText: {
+    color: '#FFFFFF',
+    fontWeight: '800',
+    fontSize: 13,
   },
 });

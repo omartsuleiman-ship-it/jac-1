@@ -44,7 +44,7 @@ export const getStaticPois = (): RadarPoi[] => {
       };
     });
 
-  return staticPoisCache;
+  return staticPoisCache!;
 };
 
 // ── User-added POIs (Radar / Speed Bump / Comment), persisted locally ──
@@ -121,4 +121,54 @@ export const boundingBoxFilter = (
   return pois.filter(
     (p) => p.latitude >= minLat && p.latitude <= maxLat && p.longitude >= minLon && p.longitude <= maxLon
   );
+};
+// ── Viewport clustering for the map screen ──
+export interface RadarCluster {
+  id: string;
+  latitude: number;
+  longitude: number;
+  count: number;
+  poi?: RadarPoi; // موجودة بس لما count === 1
+}
+
+export const clusterPois = (
+  pois: RadarPoi[],
+  region: { latitude: number; longitude: number; latitudeDelta: number; longitudeDelta: number }
+): RadarCluster[] => {
+  const margin = 0.25;
+  const minLat = region.latitude - (region.latitudeDelta / 2) * (1 + margin);
+  const maxLat = region.latitude + (region.latitudeDelta / 2) * (1 + margin);
+  const minLon = region.longitude - (region.longitudeDelta / 2) * (1 + margin);
+  const maxLon = region.longitude + (region.longitudeDelta / 2) * (1 + margin);
+
+  const visible = pois.filter(
+    (p) => p.latitude >= minLat && p.latitude <= maxLat && p.longitude >= minLon && p.longitude <= maxLon
+  );
+
+  const cellSize = region.latitudeDelta / 20;
+  if (!cellSize || cellSize <= 0) {
+    return visible.map((p) => ({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p }));
+  }
+
+  const cells = new Map<string, RadarPoi[]>();
+  for (const p of visible) {
+    const key = `${Math.floor(p.latitude / cellSize)}:${Math.floor(p.longitude / cellSize)}`;
+    const bucket = cells.get(key);
+    if (bucket) bucket.push(p);
+    else cells.set(key, [p]);
+  }
+
+  const clusters: RadarCluster[] = [];
+  cells.forEach((bucket, key) => {
+    if (bucket.length === 1) {
+      const p = bucket[0];
+      clusters.push({ id: p.id, latitude: p.latitude, longitude: p.longitude, count: 1, poi: p });
+    } else {
+      const avgLat = bucket.reduce((sum, p) => sum + p.latitude, 0) / bucket.length;
+      const avgLon = bucket.reduce((sum, p) => sum + p.longitude, 0) / bucket.length;
+      clusters.push({ id: `cluster-${key}`, latitude: avgLat, longitude: avgLon, count: bucket.length });
+    }
+  });
+
+  return clusters;
 };
