@@ -1,9 +1,9 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import React, { useCallback, useMemo, useState } from 'react';
-import { Alert, Modal, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRadar } from '../hooks/useRadarWatchdog';
-import { RadarPoi, RadarPoiType, saveUserPoi } from '../services/radarService';
+import { RadarPoi, RadarPoiType, deleteUserPoi, saveUserPoi } from '../services/radarService';
 import { COLORS, useLang } from './_layout';
 
 const PIN_COLORS: Record<RadarPoiType, string> = {
@@ -25,7 +25,10 @@ export default function RadarScreen() {
   } = useRadar();
 
   const [modalVisible, setModalVisible] = useState(false);
+  const [commentModalVisible, setCommentModalVisible] = useState(false);
+  const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const mapRef = useRef<MapView>(null);
 
   const speedKmh =
     location?.coords.speed && location.coords.speed > 0 ? Math.round(location.coords.speed * 3.6) : 0;
@@ -43,7 +46,7 @@ export default function RadarScreen() {
   }, []);
 
   const handleAddPoi = useCallback(
-    async (type: RadarPoiType) => {
+    async (type: RadarPoiType, note?: string) => {
       if (!pendingCoords) return;
       const poi: RadarPoi = {
         id: `user-${Date.now()}`,
@@ -51,6 +54,7 @@ export default function RadarScreen() {
         latitude: pendingCoords.latitude,
         longitude: pendingCoords.longitude,
         maxspeed: null,
+        note,
         source: 'user',
       };
       try {
@@ -60,10 +64,55 @@ export default function RadarScreen() {
         Alert.alert(isAr ? 'خطأ' : 'Error', isAr ? 'تعذر حفظ النقطة' : 'Failed to save the point');
       }
       setModalVisible(false);
+      setCommentModalVisible(false);
+      setCommentText('');
       setPendingCoords(null);
     },
     [pendingCoords, refreshPois, isAr]
   );
+
+  const handleOpenCommentInput = useCallback(() => {
+    setModalVisible(false);
+    setCommentModalVisible(true);
+  }, []);
+
+  const handleSaveComment = useCallback(() => {
+    const trimmed = commentText.trim();
+    if (!trimmed) return;
+    handleAddPoi('comment', trimmed);
+  }, [commentText, handleAddPoi]);
+
+  const handleDeletePoi = useCallback(
+    (poi: RadarPoi) => {
+      if (poi.source !== 'user') return; // static OSM POIs are strictly read-only
+      Alert.alert(
+        isAr ? 'حذف النقطة' : 'Delete marker',
+        isAr ? 'هل تريد حذف هذه النقطة؟' : 'Delete this marker?',
+        [
+          { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+          {
+            text: isAr ? 'حذف' : 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              await deleteUserPoi(poi.id);
+              await refreshPois();
+            },
+          },
+        ]
+      );
+    },
+    [isAr, refreshPois]
+  );
+
+  const handleRecenter = useCallback(() => {
+    if (!location || !mapRef.current) return;
+    mapRef.current.animateCamera({
+      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+      // heading is -1 when the device has no reliable course (stationary /
+      // weak fix) — animateCamera would otherwise snap to north unexpectedly.
+      heading: location.coords.heading != null && location.coords.heading >= 0 ? location.coords.heading : undefined,
+    });
+  }, [location]);
 
   const poiLabel = useCallback(
     (poi: RadarPoi) => {
@@ -86,55 +135,74 @@ export default function RadarScreen() {
           coordinate={{ latitude: poi.latitude, longitude: poi.longitude }}
           pinColor={PIN_COLORS[poi.type]}
           title={poiLabel(poi)}
+          onCalloutPress={() => handleDeletePoi(poi)}
         />
       )),
-    [nearbyPois, poiLabel]
+    [nearbyPois, poiLabel, handleDeletePoi]
   );
 
   return (
     <View style={styles.container}>
       <MapView
+        ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         initialRegion={initialRegion}
+        mapType="hybrid"
         showsUserLocation
         showsMyLocationButton
+        showsCompass
+        {...({ showsUserHeading: true } as any)}
         onLongPress={handleLongPress}
       >
         {markers}
       </MapView>
 
-      {!foregroundPermissionGranted && (
-        <View style={styles.permissionBanner}>
-          <Text style={styles.permissionText}>
-            {isAr
-              ? 'يجب السماح بالوصول للموقع لتفعيل تنبيهات الرادار'
-              : 'Location permission is required for radar alerts'}
+      <Pressable style={styles.recenterButton} onPress={handleRecenter}>
+        <Ionicons name="locate" size={22} color="#FFFFFF" />
+      </Pressable>
+
+      <View style={styles.topOverlay} pointerEvents="box-none">
+        <View style={styles.toggleCard}>
+            <Text style={styles.toggleLabel}>
+            {smartAlertsEnabled
+              ? isAr
+                ? 'تنبيه عند تجاوز السرعة فقط'
+                : 'Alert only if speeding'
+              : isAr
+              ? 'تنبيه لكل الرادارات'
+              : 'Alert for all radars'}
           </Text>
+          <Switch
+            value={smartAlertsEnabled}
+            onValueChange={setSmartAlertsEnabled}
+            trackColor={{ false: COLORS.inactive, true: COLORS.active }}
+            thumbColor="#FFFFFF"
+          />
         </View>
-      )}
-      {foregroundPermissionGranted && !backgroundPermissionGranted && (
-        <View style={styles.permissionBanner}>
-          <Text style={styles.permissionText}>
-            {isAr
-              ? 'التنبيهات ستعمل فقط أثناء فتح التطبيق. اسمح بالوصول للموقع "دائماً" من الإعدادات لتعمل والشاشة مقفلة'
-              : 'Alerts will only work while the app is open. Allow "Always" location access in Settings for screen-off alerts'}
-          </Text>
-        </View>
-      )}
+
+        {!foregroundPermissionGranted && (
+          <View style={styles.permissionBanner}>
+            <Text style={styles.permissionText}>
+              {isAr
+                ? 'يجب السماح بالوصول للموقع لتفعيل تنبيهات الرادار'
+                : 'Location permission is required for radar alerts'}
+            </Text>
+          </View>
+        )}
+        {foregroundPermissionGranted && !backgroundPermissionGranted && (
+          <View style={styles.permissionBanner}>
+            <Text style={styles.permissionText}>
+              {isAr
+                ? 'التنبيهات ستعمل فقط أثناء فتح التطبيق. اسمح بالوصول للموقع "دائماً" من الإعدادات لتعمل والشاشة مقفلة'
+                : 'Alerts will only work while the app is open. Allow "Always" location access in Settings for screen-off alerts'}
+            </Text>
+          </View>
+        )}
+      </View>
 
       <View style={styles.speedometer}>
         <Text style={styles.speedValue}>{speedKmh}</Text>
         <Text style={styles.speedUnit}>{isAr ? 'كم/س' : 'km/h'}</Text>
-      </View>
-
-      <View style={styles.toggleCard}>
-        <Text style={styles.toggleLabel}>{isAr ? 'تنبيهات ذكية' : 'Smart Alerts'}</Text>
-        <Switch
-          value={smartAlertsEnabled}
-          onValueChange={setSmartAlertsEnabled}
-          trackColor={{ false: COLORS.inactive, true: COLORS.active }}
-          thumbColor="#FFFFFF"
-        />
       </View>
 
       <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
@@ -160,7 +228,7 @@ export default function RadarScreen() {
 
             <Pressable
               style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]}
-              onPress={() => handleAddPoi('comment')}
+              onPress={handleOpenCommentInput}
             >
               <Ionicons name="chatbubble" size={20} color={PIN_COLORS.comment} />
               <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
@@ -172,17 +240,57 @@ export default function RadarScreen() {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={commentModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCommentModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>{isAr ? 'اكتب ملاحظتك' : 'Write your comment'}</Text>
+            <TextInput
+              style={styles.commentInput}
+              value={commentText}
+              onChangeText={setCommentText}
+              placeholder={isAr ? 'مثال: بوابة تفتيش' : 'e.g. Checkpoint gate'}
+              placeholderTextColor={COLORS.inactive}
+              multiline
+              autoFocus
+            />
+            <Pressable style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]} onPress={handleSaveComment}>
+              <Ionicons name="checkmark" size={20} color={PIN_COLORS.comment} />
+              <Text style={styles.modalOptionText}>{isAr ? 'حفظ' : 'Save'}</Text>
+            </Pressable>
+            <Pressable
+              style={styles.modalCancel}
+              onPress={() => {
+                setCommentModalVisible(false);
+                setCommentText('');
+              }}
+            >
+              <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
-  permissionBanner: {
+  topOverlay: {
     position: 'absolute',
     top: 50,
     left: 16,
     right: 16,
+    flexDirection: 'column',
+  },
+  permissionBanner: {
+    alignSelf: 'stretch',
+    marginTop: 8,
     backgroundColor: COLORS.tabBarBg,
     borderColor: COLORS.tabBarBorder,
     borderWidth: 1,
@@ -192,23 +300,21 @@ const styles = StyleSheet.create({
   permissionText: { color: '#FFFFFF', textAlign: 'center', fontSize: 13 },
   speedometer: {
     position: 'absolute',
-    bottom: 110,
-    alignSelf: 'center',
+    bottom: 20,
+    left: 20,
     backgroundColor: COLORS.tabBarBg,
     borderColor: COLORS.tabBarBorder,
     borderWidth: 1,
-    borderRadius: 60,
-    width: 100,
-    height: 100,
+    borderRadius: 45,
+    width: 90,
+    height: 90,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  speedValue: { color: COLORS.active, fontSize: 32, fontWeight: '800' },
-  speedUnit: { color: COLORS.inactive, fontSize: 11, marginTop: -2 },
+  speedValue: { color: COLORS.active, fontSize: 28, fontWeight: '800' },
+  speedUnit: { color: COLORS.inactive, fontSize: 10, marginTop: -2 },
   toggleCard: {
-    position: 'absolute',
-    top: 50,
-    right: 16,
+    alignSelf: 'flex-end',
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: COLORS.tabBarBg,
@@ -241,4 +347,27 @@ const styles = StyleSheet.create({
   modalOptionText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', marginLeft: 10 },
   modalCancel: { alignItems: 'center', paddingVertical: 10, marginTop: 4 },
   modalCancelText: { color: COLORS.inactive, fontSize: 13 },
+  commentInput: {
+    borderWidth: 1,
+    borderColor: COLORS.tabBarBorder,
+    borderRadius: 10,
+    color: '#FFFFFF',
+    padding: 12,
+    minHeight: 80,
+    textAlignVertical: 'top',
+    marginBottom: 14,
+  },
+  recenterButton: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 });

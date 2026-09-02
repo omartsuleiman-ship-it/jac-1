@@ -44,7 +44,9 @@ type LocationListener = (loc: Location.LocationObject) => void;
 const uiListeners = new Set<LocationListener>();
 const subscribeToRadarLocation = (cb: LocationListener) => {
   uiListeners.add(cb);
-  return () => uiListeners.delete(cb);
+  return () => {
+    uiListeners.delete(cb);
+  };
 };
 
 type DebounceMap = Record<string, number>;
@@ -187,10 +189,20 @@ function useRadarEngine() {
   const [backgroundPermissionGranted, setBackgroundPermissionGranted] = useState(false);
 
   const allPoisRef = useRef<RadarPoi[]>([]);
+  // Last known fix, kept outside React state so refreshPois() (called right
+  // after saving a POI) can recompute the visible marker set immediately —
+  // without this, a newly-saved POI wouldn't render until the next GPS tick,
+  // which could be many seconds away or not come at all while stationary.
+  const lastLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
 
   const refreshPois = useCallback(async () => {
     const userPois = await loadUserPois();
     allPoisRef.current = [...getStaticPois(), ...userPois];
+    if (lastLocationRef.current) {
+      setNearbyPois(
+        boundingBoxFilter(allPoisRef.current, lastLocationRef.current.latitude, lastLocationRef.current.longitude, NEARBY_RADIUS_KM)
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -203,6 +215,7 @@ function useRadarEngine() {
   useEffect(() => {
     const unsubscribe = subscribeToRadarLocation((loc) => {
       setLocation(loc);
+      lastLocationRef.current = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
       setNearbyPois(
         boundingBoxFilter(allPoisRef.current, loc.coords.latitude, loc.coords.longitude, NEARBY_RADIUS_KM)
       );
@@ -230,19 +243,22 @@ function useRadarEngine() {
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (alreadyRunning) return;
 
-      await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: LOCATION_TIME_INTERVAL_MS,
-        distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
-        activityType: Location.ActivityType.AutomotiveNavigation,
-        showsBackgroundLocationIndicator: true, // iOS: blue status-bar pill while tracking in bg
-        foregroundService: {
-          // Android: mandatory — this is the persistent notification that
-          // keeps the OS from killing the process while backgrounded.
-          notificationTitle: 'Radar alerts / تنبيهات الرادار',
-          notificationBody: 'Tracking your location for speed camera alerts.',
-        },
-      });
+     /*
+    await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
+      accuracy: Location.Accuracy.BestForNavigation,
+      timeInterval: LOCATION_TIME_INTERVAL_MS,
+      distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
+      activityType: Location.ActivityType.AutomotiveNavigation,
+      showsBackgroundLocationIndicator: true, // iOS: blue status-bar pill while tracking in bg
+      foregroundService: {
+        // Android: mandatory - this is the persistent notification that
+        // keeps the OS from killing the process while backgrounded.
+        notificationTitle: 'Radar alerts / تنبيهات الرادار',
+        notificationBody: 'Tracking your location for speed camera alerts.',
+      },
+    });
+    */
+    console.log("Radar bypassed for Expo Go");
     })();
 
     // Deliberately NOT stopping updates on unmount — the entire point of
