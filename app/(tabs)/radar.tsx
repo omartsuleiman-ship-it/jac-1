@@ -74,6 +74,18 @@ export default function RadarScreen() {
     longitudeDelta: 0.05,
   };
 
+  // Corrects the Cairo fallback the moment the first real fix lands, then
+  // gets out of the way — must never fight the user's own panning/zooming
+  // on subsequent fixes, hence the one-time ref instead of a dependency.
+  const hasCenteredOnFirstFixRef = useRef(false);
+  useEffect(() => {
+    if (!location || hasCenteredOnFirstFixRef.current || !mapRef.current) return;
+    hasCenteredOnFirstFixRef.current = true;
+    mapRef.current.animateCamera({
+      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+    });
+  }, [location]);
+
   const handleLongPress = useCallback((e: any) => {
     setPendingCoords(e.nativeEvent.coordinate);
     setModalVisible(true);

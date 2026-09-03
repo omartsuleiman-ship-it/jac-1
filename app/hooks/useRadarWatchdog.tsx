@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Audio } from 'expo-av';
 import * as Location from 'expo-location';
-import * as Speech from 'expo-speech';
 import * as TaskManager from 'expo-task-manager';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import {
@@ -68,31 +68,76 @@ const saveDebounceMap = async (map: DebounceMap) => {
   }
 };
 
-// Returns true if it actually spoke, so the caller only stamps the
-// debounce map for cameras that really got announced.
-const speakBilingual = (poi: RadarPoi, speedKmh: number, smartAlertsEnabled: boolean, isAr: boolean): boolean => {
-  const hasLimit = poi.maxspeed !== null && poi.maxspeed !== undefined;
-  const language = isAr ? 'ar-SA' : 'en-US';
+// ── Pre-recorded alert audio (expo-av) ──
+// TTS couldn't be relied on to keep speaking with the screen off, so alerts
+// are now short pre-recorded clips instead. Metro resolves require() paths
+// statically at BUILD time — every path below must exist on disk or the
+// whole bundle fails to build. Extend this the same way once you've
+// recorded more clips; don't reference a limit here until both its files
+// (ar + en) actually exist under assets/sounds/.
+const RADAR_SOUNDS: Record<'ar' | 'en', Record<number, any>> = {
+  en: {
+    60: require('../assets/sounds/radar_60_en.mp3'),
+    80: require('../assets/sounds/radar_80_en.mp3'),
+    90: require('../assets/sounds/radar_90_en.mp3'),
+    100: require('../assets/sounds/radar_100_en.mp3'),
+    120: require('../assets/sounds/radar_120_en.mp3'),
+  },
+  ar: {
+    60: require('../assets/sounds/radar_60_ar.mp3'),
+    80: require('../assets/sounds/radar_80_ar.mp3'),
+    90: require('../assets/sounds/radar_90_ar.mp3'),
+    100: require('../assets/sounds/radar_100_ar.mp3'),
+    120: require('../assets/sounds/radar_120_ar.mp3'),
+  },
+};
 
-  if (smartAlertsEnabled) {
-    // Smart mode: only interrupt the driver if they're actually over the
-    // limit. Unknown maxspeed means there's nothing to compare against, so
-    // stay silent rather than guess.
-    if (!hasLimit || speedKmh <= (poi.maxspeed as number)) return false;
-    const text = isAr ? `خفف السرعة! الحد المسموح ${poi.maxspeed}` : `Slow down! Speed limit is ${poi.maxspeed}.`;
-    Speech.speak(text, { language });
-    return true;
+const GENERIC_RADAR_SOUND: Record<'ar' | 'en', any> = {
+  en: require('../assets/sounds/radar_general_en.mp3'),
+  ar: require('../assets/sounds/radar_general_ar.mp3'),
+};
+
+// Runs once at module load — same timing guarantee as TaskManager.defineTask
+// below, so playback is configured before the first alert can possibly
+// fire, including on a cold headless-JS start with the screen off.
+Audio.setAudioModeAsync({
+  staysActiveInBackground: true,
+  playsInSilentModeIOS: true,
+  shouldDuckAndroid: true,
+}).catch((err) => console.warn('[Radar] failed to configure audio mode:', err));
+
+let currentSound: Audio.Sound | null = null;
+
+const playRadarSound = async (poi: RadarPoi, isAr: boolean) => {
+  const lang: 'ar' | 'en' = isAr ? 'ar' : 'en';
+  const asset = (poi.maxspeed !== null && RADAR_SOUNDS[lang][poi.maxspeed]) || GENERIC_RADAR_SOUND[lang];
+
+  try {
+    // Only one clip should ever be audible at a time.
+    if (currentSound) {
+      await currentSound.unloadAsync().catch(() => {});
+      currentSound = null;
+    }
+    const { sound } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
+    currentSound = sound;
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        sound.unloadAsync().catch(() => {});
+        if (currentSound === sound) currentSound = null;
+      }
+    });
+  } catch (err) {
+    console.warn('[Radar] failed to play alert sound:', err);
   }
+};
 
-  const text = hasLimit
-    ? isAr
-      ? `أمامك رادار، السرعة ${poi.maxspeed}`
-      : `Speed camera ahead. Limit ${poi.maxspeed}.`
-    : isAr
-    ? 'أمامك رادار'
-    : 'Speed camera ahead.';
-  Speech.speak(text, { language });
-  return true;
+// Same gating speakBilingual() used to do: smart mode only interrupts the
+// driver if they're actually over the limit (staying silent when the limit
+// is unknown, rather than guessing); non-smart mode announces every camera.
+const shouldTriggerAlert = (poi: RadarPoi, speedKmh: number, smartAlertsEnabled: boolean): boolean => {
+  if (!smartAlertsEnabled) return true;
+  const hasLimit = poi.maxspeed !== null && poi.maxspeed !== undefined;
+  return hasLimit && speedKmh > (poi.maxspeed as number);
 };
 
 // ── The background task itself. defineTask() must run at module scope
@@ -152,7 +197,8 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
     const last = debounceMap[poi.id] ?? 0;
     if (now - last < ALERT_DEBOUNCE_MS) continue;
 
-    if (speakBilingual(poi, speedKmh, smartAlertsEnabled, isAr)) {
+    if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
+      await playRadarSound(poi, isAr);
       debounceMap[poi.id] = now;
       debounceDirty = true;
     }
@@ -206,7 +252,39 @@ function useRadarEngine() {
   }, []);
 
   useEffect(() => {
-    refreshPois();
+    let cancelled = false;
+
+    (async () => {
+      await refreshPois(); // populate allPoisRef first so the filter below has something to filter
+
+      // Instant-load path: use whatever fix the OS already has cached (or a
+      // quick low-accuracy fix) so the map centers and markers render right
+      // away, instead of waiting 20-30s for the first BestForNavigation fix
+      // from startLocationUpdatesAsync below. If permission isn't granted
+      // yet, both calls just throw — caught and ignored; the normal
+      // high-accuracy watcher will populate location once it's granted.
+      try {
+        let quick = await Location.getLastKnownPositionAsync({
+          maxAge: 5 * 60 * 1000,
+          requiredAccuracy: 5000,
+        });
+        if (!quick) {
+          quick = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
+        }
+        if (cancelled || !quick) return;
+        setLocation(quick);
+        lastLocationRef.current = { latitude: quick.coords.latitude, longitude: quick.coords.longitude };
+        setNearbyPois(
+          boundingBoxFilter(allPoisRef.current, quick.coords.latitude, quick.coords.longitude, NEARBY_RADIUS_KM)
+        );
+      } catch {
+        // Best-effort — see comment above.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [refreshPois]);
 
   // Drives the map/speedometer only — alerting lives entirely in the
