@@ -16,9 +16,14 @@ import {
 // ── Tunables ──
 const NEARBY_RADIUS_KM = 5; // slice rendered on the map
 const BOUNDING_BOX_KM = 2; // cheap pre-filter radius, run BEFORE any trig
-const ALERT_RADIUS_M = 500; // Haversine alert threshold
+const ALERT_RADIUS_M = 700; // Haversine alert threshold — gives more braking distance
 const FORWARD_CONE_DEG = 45; // |heading - bearing| tolerance
-const ALERT_DEBOUNCE_MS = 45000; // per-camera-id debounce (within the requested 30-60s window)
+// Bumped past the original 30-60s window on purpose: at 700m, a driver at
+// city speeds (~40 km/h) can take 60s+ to cross the whole zone before
+// reaching the camera. A 45s cooldown would let the exact loop you're
+// trying to prevent happen mid-zone. 90s comfortably covers that crossing
+// time at any speed you'd realistically be driving when this fires.
+const ALERT_DEBOUNCE_MS = 90000;
 const LOCATION_TIME_INTERVAL_MS = 3000;
 const LOCATION_DISTANCE_INTERVAL_M = 15;
 
