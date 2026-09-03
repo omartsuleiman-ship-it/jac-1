@@ -1,7 +1,20 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import {
+  Alert,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRadar } from '../hooks/useRadarWatchdog';
 import {
@@ -54,6 +67,10 @@ export default function RadarScreen() {
   const [searchText, setSearchText] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<Array<{ latitude: number; longitude: number; label: string }>>([]);
+
+  const [suggestions, setSuggestions] = useState<Array<{ latitude: number; longitude: number; label: string }>>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const suggestionsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadAllPois = useCallback(async () => {
     const userPois = await loadUserPois();
@@ -187,6 +204,54 @@ export default function RadarScreen() {
     setSearching(false);
   }, [searchText, isAr]);
 
+  useEffect(() => {
+    return () => {
+      if (suggestionsDebounceRef.current) clearTimeout(suggestionsDebounceRef.current);
+    };
+  }, []);
+
+  const fetchSuggestions = useCallback(
+    (query: string) => {
+      if (suggestionsDebounceRef.current) clearTimeout(suggestionsDebounceRef.current);
+
+      const trimmed = query.trim();
+      if (trimmed.length < 2) {
+        setSuggestions([]);
+        setSuggestionsLoading(false);
+        return;
+      }
+
+      suggestionsDebounceRef.current = setTimeout(async () => {
+        setSuggestionsLoading(true);
+        try {
+          const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+            trimmed
+          )}&format=json&countrycodes=eg&limit=5`;
+          const response = await fetch(url, {
+            headers: {
+              // Nominatim's usage policy requires a distinguishing User-Agent —
+              // requests without one risk silent rate-limiting or blocking.
+              'User-Agent': 'jac-radar-app/1.0',
+              'Accept-Language': isAr ? 'ar' : 'en',
+            },
+          });
+          const results = await response.json();
+          setSuggestions(
+            (Array.isArray(results) ? results : []).map((r: any) => ({
+              latitude: parseFloat(r.lat),
+              longitude: parseFloat(r.lon),
+              label: r.display_name as string,
+            }))
+          );
+        } catch {
+          setSuggestions([]);
+        }
+        setSuggestionsLoading(false);
+      }, 400);
+    },
+    [isAr]
+  );
+
   const handleSelectSearchResult = useCallback(
     (result: { latitude: number; longitude: number; label: string }) => {
       // نطاق ثابت أكبر شوية من الوضع العادي عشان يغطي منطقة/تجمع كامل تقريبًا
@@ -204,6 +269,7 @@ export default function RadarScreen() {
       setSearchModalVisible(false);
       setSearchText('');
       setSearchResults([]);
+      setSuggestions([]);
     },
     []
   );
@@ -449,57 +515,82 @@ export default function RadarScreen() {
         animationType="fade"
         onRequestClose={() => setSearchModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>{isAr ? 'ابحث عن منطقة' : 'Search a place'}</Text>
-            <TextInput
-              style={styles.commentInput}
-              value={searchText}
-              onChangeText={setSearchText}
-              placeholder={isAr ? 'مثال: التجمع الخامس' : 'e.g. Maadi'}
-              placeholderTextColor={COLORS.inactive}
-              autoFocus
-              onSubmitEditing={handleSearchSubmit}
-            />
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <Text style={styles.modalTitle}>{isAr ? 'ابحث عن منطقة' : 'Search a place'}</Text>
+              <TextInput
+                style={styles.commentInput}
+                value={searchText}
+                onChangeText={(text) => {
+                  setSearchText(text);
+                  fetchSuggestions(text);
+                }}
+                placeholder={isAr ? 'مثال: التجمع الخامس' : 'e.g. Maadi'}
+                placeholderTextColor={COLORS.inactive}
+                autoFocus
+                onSubmitEditing={handleSearchSubmit}
+              />
 
-            {searchResults.length > 0 && (
-              <ScrollView style={styles.searchResultsList}>
-                {searchResults.map((r, idx: number) => (
-                  <Pressable
-                    key={`${r.latitude}-${r.longitude}-${idx}`}
-                    style={styles.searchResultRow}
-                    onPress={() => handleSelectSearchResult(r)}
-                  >
-                    <Ionicons name="location" size={16} color={COLORS.active} />
-                    <Text style={styles.searchResultText}>{r.label}</Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
+              {suggestionsLoading && (
+                <Text style={styles.searchLoadingText}>{isAr ? 'جاري البحث...' : 'Searching...'}</Text>
+              )}
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: COLORS.active, opacity: searching ? 0.5 : 1 }]}
-              onPress={handleSearchSubmit}
-              disabled={searching}
-            >
-              <Ionicons name="search" size={20} color={COLORS.active} />
-              <Text style={styles.modalOptionText}>
-                {searching ? (isAr ? 'جاري البحث...' : 'Searching...') : isAr ? 'بحث' : 'Search'}
-              </Text>
-            </Pressable>
+              {suggestions.length > 0 && (
+                <FlatList
+                  style={styles.searchResultsList}
+                  data={suggestions}
+                  keyboardShouldPersistTaps="handled"
+                  keyExtractor={(item, idx) => `sugg-${item.latitude}-${item.longitude}-${idx}`}
+                  renderItem={({ item }) => (
+                    <Pressable style={styles.searchResultRow} onPress={() => handleSelectSearchResult(item)}>
+                      <Ionicons name="location" size={16} color={COLORS.active} />
+                      <Text style={styles.searchResultText}>{item.label}</Text>
+                    </Pressable>
+                  )}
+                />
+              )}
 
-            <Pressable
-              style={styles.modalCancel}
-              onPress={() => {
-                setSearchModalVisible(false);
-                setSearchText('');
-                setSearchResults([]);
-              }}
-            >
-              <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
-            </Pressable>
+              {searchResults.length > 0 && (
+                <ScrollView style={styles.searchResultsList} keyboardShouldPersistTaps="handled">
+                  {searchResults.map((r, idx: number) => (
+                    <Pressable
+                      key={`${r.latitude}-${r.longitude}-${idx}`}
+                      style={styles.searchResultRow}
+                      onPress={() => handleSelectSearchResult(r)}
+                    >
+                      <Ionicons name="location" size={16} color={COLORS.active} />
+                      <Text style={styles.searchResultText}>{r.label}</Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              )}
+
+              <Pressable
+                style={[styles.modalOption, { borderColor: COLORS.active, opacity: searching ? 0.5 : 1 }]}
+                onPress={handleSearchSubmit}
+                disabled={searching}
+              >
+                <Ionicons name="search" size={20} color={COLORS.active} />
+                <Text style={styles.modalOptionText}>
+                  {searching ? (isAr ? 'جاري البحث...' : 'Searching...') : isAr ? 'بحث' : 'Search'}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                style={styles.modalCancel}
+                onPress={() => {
+                  setSearchModalVisible(false);
+                  setSearchText('');
+                  setSearchResults([]);
+                  setSuggestions([]);
+                }}
+              >
+                <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
+              </Pressable>
+            </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -636,5 +727,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginLeft: 8,
     flex: 1,
+  },
+  searchLoadingText: {
+    color: COLORS.inactive,
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 8,
   },
 });
