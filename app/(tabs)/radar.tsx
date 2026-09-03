@@ -1,12 +1,13 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
   RadarPoiType,
-  clusterPois,
+  boundingBoxFilter,
   deleteUserPoi,
   getStaticPois,
   loadUserPois,
@@ -24,6 +25,7 @@ export default function RadarScreen() {
   const { isAr } = useLang();
   const {
     location,
+    nearbyPois,
     foregroundPermissionGranted,
     backgroundPermissionGranted,
     smartAlertsEnabled,
@@ -37,25 +39,25 @@ export default function RadarScreen() {
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const mapRef = useRef<MapView>(null);
 
-  const regionUpdateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [allPois, setAllPois] = useState<RadarPoi[]>([]);
-  const [region, setRegion] = useState<Region>({
-    latitude: location?.coords.latitude ?? 30.0444,
-    longitude: location?.coords.longitude ?? 31.2357,
-    latitudeDelta: 0.05,
-    longitudeDelta: 0.05,
-  });
+  // لما ده يبقى فيه قيمة، الماب بتعرض ردارات منطقة معينة (بحث أو نقطة
+  // long-press) بدل الردارات القريبة من موقعك الحالي. بيترجع null (يعني
+  // رجوع للوضع العادي) لما تعمل بحث جديد، أو طلب "ردارات محيطة" جديد،
+  // أو تدوس زرار الموقع، أو تقفل الشاشة (بيتصفّر تلقائي مع كل mount جديد).
+  const [customView, setCustomView] = useState<{
+    center: { latitude: number; longitude: number };
+    radiusKm: number;
+    label?: string;
+  } | null>(null);
+
+  const [searchModalVisible, setSearchModalVisible] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<Array<{ latitude: number; longitude: number; label: string }>>([]);
 
   const loadAllPois = useCallback(async () => {
     const userPois = await loadUserPois();
     setAllPois([...getStaticPois(), ...userPois]);
-  }, []);
-
-  // تأخير بسيط قبل إعادة حساب الكلاسترز — عشان الحركة/الزوم السريع ميعملش
-  // عشرات عمليات إعادة رسم متلاحقة تقفل التطبيق.
-  const handleRegionChangeComplete = useCallback((r: Region) => {
-    if (regionUpdateTimer.current) clearTimeout(regionUpdateTimer.current);
-    regionUpdateTimer.current = setTimeout(() => setRegion(r), 400);
   }, []);
 
   useEffect(() => {
@@ -138,7 +140,81 @@ export default function RadarScreen() {
     [isAr, refreshPois, loadAllPois]
   );
 
+  const formatAddressLabel = (addr: Location.LocationGeocodedAddress): string => {
+    const parts = [addr.name, addr.district, addr.city, addr.subregion].filter(
+      (p, idx, arr) => !!p && arr.indexOf(p) === idx
+    );
+    return parts.length > 0 ? parts.join('، ') : isAr ? 'موقع غير مسمى' : 'Unnamed location';
+  };
+
+  const handleSearchSubmit = useCallback(async () => {
+    const query = searchText.trim();
+    if (!query) return;
+    setSearching(true);
+    try {
+      const geocoded = await Location.geocodeAsync(query);
+      if (!geocoded || geocoded.length === 0) {
+        Alert.alert(isAr ? 'لا توجد نتائج' : 'No results', isAr ? 'لم يتم العثور على هذا المكان' : 'Could not find that place');
+        setSearching(false);
+        return;
+      }
+      const withLabels = await Promise.all(
+        geocoded.slice(0, 8).map(async (g) => {
+          try {
+            const [addr] = await Location.reverseGeocodeAsync({ latitude: g.latitude, longitude: g.longitude });
+            return { latitude: g.latitude, longitude: g.longitude, label: addr ? formatAddressLabel(addr) : query };
+          } catch {
+            return { latitude: g.latitude, longitude: g.longitude, label: query };
+          }
+        })
+      );
+      setSearchResults(withLabels);
+    } catch (error) {
+      Alert.alert(isAr ? 'خطأ' : 'Error', isAr ? 'تعذر البحث الآن' : 'Search failed');
+    }
+    setSearching(false);
+  }, [searchText, isAr]);
+
+  const handleSelectSearchResult = useCallback(
+    (result: { latitude: number; longitude: number; label: string }) => {
+      // نطاق ثابت أكبر شوية من الوضع العادي عشان يغطي منطقة/تجمع كامل تقريبًا
+      // (مفيش عندنا بيانات حدود مناطق فعلية نستخدمها). العرض pins عادية
+      // بدون تجميع زي أي وضع تاني، فمفيش خطورة هنج حتى لو العدد زاد شوية.
+      const SEARCH_RADIUS_KM = 8;
+      setCustomView({
+        center: { latitude: result.latitude, longitude: result.longitude },
+        radiusKm: SEARCH_RADIUS_KM,
+        label: result.label,
+      });
+      mapRef.current?.animateCamera({
+        center: { latitude: result.latitude, longitude: result.longitude },
+      });
+      setSearchModalVisible(false);
+      setSearchText('');
+      setSearchResults([]);
+    },
+    []
+  );
+
+  const handleShowSurroundingRadars = useCallback(() => {
+    if (!pendingCoords) return;
+    const coords = pendingCoords;
+    setModalVisible(false);
+    Alert.alert(
+      isAr ? 'إظهار الردارات المحيطة' : 'Show surrounding radars',
+      isAr ? 'اختر نطاق البحث' : 'Choose the radius',
+      [
+        { text: '2 km', onPress: () => setCustomView({ center: coords, radiusKm: 2 }) },
+        { text: '5 km', onPress: () => setCustomView({ center: coords, radiusKm: 5 }) },
+        { text: '10 km', onPress: () => setCustomView({ center: coords, radiusKm: 10 }) },
+        { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+      ]
+    );
+    setPendingCoords(null);
+  }, [pendingCoords, isAr]);
+
   const handleRecenter = useCallback(() => {
+    setCustomView(null); // ارجع لعرض الردارات القريبة من موقعك الحقيقي
     if (!location || !mapRef.current) return;
     mapRef.current.animateCamera({
       center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
@@ -161,30 +237,29 @@ export default function RadarScreen() {
     [isAr]
   );
 
-  const clusters = useMemo(() => clusterPois(allPois, region), [allPois, region]);
+   // الوضع العادي: نفس القديم بالظبط — ردارات 5 كم حوالين موقعك الحقيقي
+  // (nearbyPois جاهزة من useRadar، بتتحدث مع كل GPS fix).
+  // وضع البحث/المنطقة المحيطة: فلترة من allPois (القائمة الكاملة) حوالين
+  // نقطة تانية (نتيجة بحث أو نقطة long-press) — منفصل تمامًا عن موقعك.
+  const displayedPois = useMemo(() => {
+    if (customView) {
+      return boundingBoxFilter(allPois, customView.center.latitude, customView.center.longitude, customView.radiusKm);
+    }
+    return nearbyPois;
+  }, [customView, allPois, nearbyPois]);
 
   const markers = useMemo(
     () =>
-      clusters.map((c) =>
-        c.count > 1 ? (
-          <Marker
-            key={c.id}
-            coordinate={{ latitude: c.latitude, longitude: c.longitude }}
-            pinColor="#000000"
-            title={`${c.count} radars`}
-            tracksViewChanges={false}
-          />
-        ) : (
-          <Marker
-            key={c.id}
-            coordinate={{ latitude: c.poi!.latitude, longitude: c.poi!.longitude }}
-            pinColor={PIN_COLORS[c.poi!.type]}
-            title={poiLabel(c.poi!)}
-            onCalloutPress={() => handleDeletePoi(c.poi!)}
-          />
-        )
-      ),
-    [clusters, poiLabel, handleDeletePoi]
+      displayedPois.map((poi) => (
+        <Marker
+          key={poi.id}
+          coordinate={{ latitude: poi.latitude, longitude: poi.longitude }}
+          pinColor={PIN_COLORS[poi.type]}
+          title={poiLabel(poi)}
+          onCalloutPress={() => handleDeletePoi(poi)}
+        />
+      )),
+    [displayedPois, poiLabel, handleDeletePoi]
   );
 
   return (
@@ -197,8 +272,7 @@ export default function RadarScreen() {
         showsUserLocation={false}
         showsMyLocationButton
         showsCompass
-         onLongPress={handleLongPress}
-        onRegionChangeComplete={handleRegionChangeComplete}
+        onLongPress={handleLongPress}
       >
         {markers}
         {location && (
@@ -219,23 +293,39 @@ export default function RadarScreen() {
       </Pressable>
 
       <View style={styles.topOverlay} pointerEvents="box-none">
-        <View style={styles.toggleCard}>
-            <Text style={styles.toggleLabel}>
-            {smartAlertsEnabled
-              ? isAr
-                ? 'تنبيه عند تجاوز السرعة فقط'
-                : 'Alert only if speeding'
-              : isAr
-              ? 'تنبيه لكل الرادارات'
-              : 'Alert for all radars'}
-          </Text>
-          <Switch
-            value={smartAlertsEnabled}
-            onValueChange={setSmartAlertsEnabled}
-            trackColor={{ false: COLORS.inactive, true: COLORS.active }}
-            thumbColor="#FFFFFF"
-          />
+        <View style={styles.topRow}>
+          <Pressable style={styles.searchButton} onPress={() => setSearchModalVisible(true)}>
+            <Ionicons name="search" size={20} color="#FFFFFF" />
+          </Pressable>
+
+          <View style={styles.toggleCard}>
+              <Text style={styles.toggleLabel}>
+              {smartAlertsEnabled
+                ? isAr
+                  ? 'تنبيه عند تجاوز السرعة فقط'
+                  : 'Alert only if speeding'
+                : isAr
+                ? 'تنبيه لكل الرادارات'
+                : 'Alert for all radars'}
+            </Text>
+            <Switch
+              value={smartAlertsEnabled}
+              onValueChange={setSmartAlertsEnabled}
+              trackColor={{ false: COLORS.inactive, true: COLORS.active }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
         </View>
+
+        {customView && (
+          <View style={styles.customViewBanner}>
+            <Text style={styles.permissionText}>
+              {isAr
+                ? `بتعرض ردارات ${customView.label ? customView.label + ' ' : ''}(نطاق ${customView.radiusKm} كم) — دوس زرار الموقع للرجوع`
+                : `Showing radars ${customView.label ? 'near ' + customView.label + ' ' : ''}(${customView.radiusKm} km radius) — tap the location button to go back`}
+            </Text>
+          </View>
+        )}
 
         {!foregroundPermissionGranted && (
           <View style={styles.permissionBanner}>
@@ -291,6 +381,14 @@ export default function RadarScreen() {
               <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
             </Pressable>
 
+            <Pressable
+              style={[styles.modalOption, { borderColor: COLORS.active }]}
+              onPress={handleShowSurroundingRadars}
+            >
+              <Ionicons name="radio" size={20} color={COLORS.active} />
+              <Text style={styles.modalOptionText}>{isAr ? 'إظهار الردارات المحيطة' : 'Show surrounding radars'}</Text>
+            </Pressable>
+
             <Pressable style={styles.modalCancel} onPress={() => setModalVisible(false)}>
               <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
             </Pressable>
@@ -325,6 +423,65 @@ export default function RadarScreen() {
               onPress={() => {
                 setCommentModalVisible(false);
                 setCommentText('');
+              }}
+            >
+              <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={searchModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSearchModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>{isAr ? 'ابحث عن منطقة' : 'Search a place'}</Text>
+            <TextInput
+              style={styles.commentInput}
+              value={searchText}
+              onChangeText={setSearchText}
+              placeholder={isAr ? 'مثال: التجمع الخامس' : 'e.g. Maadi'}
+              placeholderTextColor={COLORS.inactive}
+              autoFocus
+              onSubmitEditing={handleSearchSubmit}
+            />
+
+            {searchResults.length > 0 && (
+              <ScrollView style={styles.searchResultsList}>
+                {searchResults.map((r, idx: number) => (
+                  <Pressable
+                    key={`${r.latitude}-${r.longitude}-${idx}`}
+                    style={styles.searchResultRow}
+                    onPress={() => handleSelectSearchResult(r)}
+                  >
+                    <Ionicons name="location" size={16} color={COLORS.active} />
+                    <Text style={styles.searchResultText}>{r.label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+
+            <Pressable
+              style={[styles.modalOption, { borderColor: COLORS.active, opacity: searching ? 0.5 : 1 }]}
+              onPress={handleSearchSubmit}
+              disabled={searching}
+            >
+              <Ionicons name="search" size={20} color={COLORS.active} />
+              <Text style={styles.modalOptionText}>
+                {searching ? (isAr ? 'جاري البحث...' : 'Searching...') : isAr ? 'بحث' : 'Search'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.modalCancel}
+              onPress={() => {
+                setSearchModalVisible(false);
+                setSearchText('');
+                setSearchResults([]);
               }}
             >
               <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
@@ -427,19 +584,45 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  clusterBadge: {
+  topRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  searchButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  clusterText: {
+  customViewBanner: {
+    alignSelf: 'stretch',
+    marginTop: 8,
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.active,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+  },
+  searchResultsList: {
+    maxHeight: 180,
+    marginBottom: 12,
+  },
+  searchResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.tabBarBorder,
+  },
+  searchResultText: {
     color: '#FFFFFF',
-    fontWeight: '800',
     fontSize: 13,
+    marginLeft: 8,
+    flex: 1,
   },
 });
