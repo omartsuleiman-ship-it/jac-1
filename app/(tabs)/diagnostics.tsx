@@ -35,10 +35,10 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 // Constants & Types
 // -----------------------------------------------------------------------------
 const COLORS = {
-  background: '#0B0D10',
-  card: '#15181C',
-  cardAlt: '#181C21',
-  cardBorder: '#22262B',
+  background: '#000000',
+  card: '#050505',
+  cardAlt: '#0A0A0A',
+  cardBorder: '#1A1A1A',
   glassBorder: 'rgba(255,255,255,0.08)',
   accent: '#00D9C6',
   accentDim: 'rgba(0, 217, 198, 0.12)',
@@ -51,7 +51,7 @@ const COLORS = {
   textPrimary: '#F5F6F7',
   textSecondary: '#8A9199',
   textTertiary: '#5B6169',
-  inputBg: '#1B1F24',
+  inputBg: '#0A0A0A',
   overlay: 'rgba(0,0,0,0.72)',
 };
 

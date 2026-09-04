@@ -32,9 +32,9 @@ const LangContext = createContext<LangContextType>({ lang: 'ar', toggleLanguage:
 export const useLang = () => useContext(LangContext);
 
 export const COLORS = {
-  background: '#0B0D10',
-  tabBarBg: '#111417',
-  tabBarBorder: '#1F2428',
+  background: '#000000',
+  tabBarBg: '#000000',
+  tabBarBorder: '#161616',
   active: '#00D9C6',
   inactive: '#5A6169',
 };
@@ -76,6 +76,12 @@ export default function TabLayout() {
       <RadarProvider>
         <GlobalSafetyWatchdog />
         <Tabs
+          // This Expo Router version's <Tabs> doesn't expose
+          // sceneContainerStyle at all (unlike raw React Navigation), so the
+          // scene background can't be set from here. Each screen's own root
+          // container (styles.safeArea / styles.container in trip.tsx,
+          // radar.tsx, diagnostics.tsx, etc.) already controls that — make
+          // sure COLORS.background is #000000 in every one of those files too.
           screenOptions={{
             headerStyle: { backgroundColor: COLORS.tabBarBg },
             headerTintColor: '#FFFFFF',
@@ -87,7 +93,7 @@ export default function TabLayout() {
             tabBarStyle: {
               backgroundColor: COLORS.tabBarBg,
               borderTopColor: COLORS.tabBarBorder,
-              borderTopWidth: 1,
+              borderTopWidth: StyleSheet.hairlineWidth,
               height: 88,
               paddingTop: 8,
               paddingBottom: 28,

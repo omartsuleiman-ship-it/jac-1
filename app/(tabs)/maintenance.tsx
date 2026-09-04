@@ -23,9 +23,9 @@ import { isConnected, sendOBDCommand } from '../services/bleService';
 import { useLang } from './_layout';
 
 const COLORS = {
-  background: '#0B0D10',
-  card: '#15181C',
-  cardBorder: '#22262B',
+  background: '#000000',
+  card: '#050505',
+  cardBorder: '#1A1A1A',
   accent: '#00D9C6',
   accentSoft: 'rgba(0, 217, 198, 0.12)',
   warning: '#FFB74D',
@@ -34,9 +34,9 @@ const COLORS = {
   dangerSoft: 'rgba(255, 107, 94, 0.12)',
   textPrimary: '#F5F6F7',
   textSecondary: '#8A9199',
-  trackBg: '#1B1F24',
-  inputBg: '#1B1F24',
-  modalBg: '#111417',
+  trackBg: '#0A0A0A',
+  inputBg: '#0A0A0A',
+  modalBg: '#000000',
   overlay: 'rgba(0,0,0,0.6)',
 };
 

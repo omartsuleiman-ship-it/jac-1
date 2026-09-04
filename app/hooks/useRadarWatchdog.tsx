@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
@@ -159,7 +159,13 @@ const GENERIC_RADAR_SOUND: Record<'ar' | 'en', any> = {
 Audio.setAudioModeAsync({
   staysActiveInBackground: true,
   playsInSilentModeIOS: true,
+  // Duck (lower, not pause) whatever's already playing — Spotify, Apple
+  // Music, podcasts, etc. — for the duration of the radar clip, then restore
+  // it automatically when playback stops. Both platforms need to be told
+  // explicitly; iOS and Android each ignore the other's flag.
+  interruptionModeIOS: InterruptionModeIOS.DuckOthers,
   shouldDuckAndroid: true,
+  interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
 }).catch((err) => console.warn('[Radar] failed to configure audio mode:', err));
 
 let currentSound: Audio.Sound | null = null;

@@ -19,9 +19,9 @@ import {
 } from '../services/bleService';
 
 const COLORS = {
-  background: '#0B0D10',
-  card: '#15181C',
-  cardBorder: '#22262B',
+  background: '#000000',
+  card: '#050505',
+  cardBorder: '#1A1A1A',
   accent: '#00D9C6',
   accentSoft: 'rgba(0, 217, 198, 0.12)',
   warning: '#FFB74D',
@@ -271,7 +271,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: '#1B1F24',
+    backgroundColor: '#0A0A0A',
     alignItems: 'center',
     justifyContent: 'center',
   },
