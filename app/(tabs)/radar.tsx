@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
-import { useRadar } from '../hooks/useRadarWatchdog';
+import { SPEED_NOISE_GATE_KMH, useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
   RadarPoiType,
@@ -41,6 +41,9 @@ export default function RadarScreen() {
     nearbyPois,
     foregroundPermissionGranted,
     backgroundPermissionGranted,
+    isScanning,
+    startScanning,
+    stopScanning,
     smartAlertsEnabled,
     setSmartAlertsEnabled,
     refreshPois,
@@ -81,8 +84,12 @@ export default function RadarScreen() {
     loadAllPois();
   }, [loadAllPois]);
 
-  const speedKmh =
+  const rawSpeedKmh =
     location?.coords.speed && location.coords.speed > 0 ? Math.round(location.coords.speed * 3.6) : 0;
+  // Same gate as the background task: raw GPS speed drifts a few km/h even
+  // parked and stationary — without this the speedometer shows a phantom
+  // reading like "11 km/h" while the car isn't moving.
+  const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
 
   const initialRegion: Region = {
     latitude: location?.coords.latitude ?? 30.0444,
@@ -371,6 +378,16 @@ export default function RadarScreen() {
       </Pressable>
 
       <View style={styles.topOverlay} pointerEvents="box-none">
+        <Pressable
+          style={[styles.scanButton, isScanning ? styles.scanButtonActive : styles.scanButtonInactive]}
+          onPress={isScanning ? stopScanning : startScanning}
+        >
+          <Ionicons name={isScanning ? 'stop-circle' : 'play-circle'} size={20} color="#FFFFFF" />
+          <Text style={styles.scanButtonText}>
+            {isScanning ? (isAr ? 'إيقاف المسح' : 'Stop Scan') : isAr ? 'ابدأ المسح' : 'Start Scan'}
+          </Text>
+        </Pressable>
+
         <View style={styles.topRow}>
           <Pressable style={styles.searchButton} onPress={() => setSearchModalVisible(true)}>
             <Ionicons name="search" size={20} color="#FFFFFF" />
@@ -426,7 +443,7 @@ export default function RadarScreen() {
       </View>
 
       <View style={styles.speedometer}>
-        <Text style={styles.speedValue}>{speedKmh}</Text>
+        <Text style={styles.speedValue}>{isScanning ? speedKmh : '--'}</Text>
         <Text style={styles.speedUnit}>{isAr ? 'كم/س' : 'km/h'}</Text>
       </View>
 
@@ -686,6 +703,29 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  scanButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 24,
+    marginBottom: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  scanButtonInactive: { backgroundColor: COLORS.active },
+  scanButtonActive: { backgroundColor: '#FF3B30' },
+  scanButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    marginLeft: 8,
   },
   topRow: {
     flexDirection: 'row',

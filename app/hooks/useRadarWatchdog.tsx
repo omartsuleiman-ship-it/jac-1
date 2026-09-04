@@ -24,8 +24,12 @@ const FORWARD_CONE_DEG = 45; // |heading - bearing| tolerance
 // trying to prevent happen mid-zone. 90s comfortably covers that crossing
 // time at any speed you'd realistically be driving when this fires.
 const ALERT_DEBOUNCE_MS = 90000;
-const LOCATION_TIME_INTERVAL_MS = 3000;
-const LOCATION_DISTANCE_INTERVAL_M = 15;
+const LOCATION_TIME_INTERVAL_MS = 1000; // 1s — was 3000, this was the visible speedometer lag
+const LOCATION_DISTANCE_INTERVAL_M = 1; // 1m — was 15, too coarse for real-time speed
+// Below this, GPS speed is treated as noise (multipath reflections, drift)
+// rather than real motion — without it, a parked car could show ~10+ km/h,
+// or even trigger a false "you're speeding" smart alert.
+export const SPEED_NOISE_GATE_KMH = 5;
 
 // ── Storage keys ──
 // This one is NOT namespaced to the radar feature on purpose: it must match
@@ -163,7 +167,8 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   uiListeners.forEach((cb) => cb(loc));
 
   const { latitude, longitude, heading, speed } = loc.coords;
-  const speedKmh = speed && speed > 0 ? speed * 3.6 : 0;
+  const rawSpeedKmh = speed && speed > 0 ? speed * 3.6 : 0;
+  const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
 
   // Read settings fresh every invocation. This task may run in a headless
   // JS instance with nothing else mounted, so it can't read React context —
@@ -218,6 +223,9 @@ interface RadarContextValue {
   nearbyPois: RadarPoi[]; // 5km slice, for map rendering
   foregroundPermissionGranted: boolean;
   backgroundPermissionGranted: boolean; // must be true for alerts to survive screen-off
+  isScanning: boolean; // whether the background location task is actively running
+  startScanning: () => void;
+  stopScanning: () => void;
   smartAlertsEnabled: boolean;
   setSmartAlertsEnabled: (val: boolean) => void;
   refreshPois: () => Promise<void>; // call after saving a new user POI
@@ -238,6 +246,9 @@ function useRadarEngine() {
   const [nearbyPois, setNearbyPois] = useState<RadarPoi[]>([]);
   const [foregroundPermissionGranted, setForegroundPermissionGranted] = useState(false);
   const [backgroundPermissionGranted, setBackgroundPermissionGranted] = useState(false);
+  // Scanning is now a deliberate user action, not automatic on tab open —
+  // startLocationUpdatesAsync only ever runs while this is true.
+  const [isScanning, setIsScanning] = useState(false);
 
   const allPoisRef = useRef<RadarPoi[]>([]);
   // Last known fix, kept outside React state so refreshPois() (called right
@@ -307,6 +318,11 @@ function useRadarEngine() {
   }, []);
 
   useEffect(() => {
+    // Manual scan toggle: don't touch permissions or start anything until
+    // the user explicitly presses "Start Scan". Re-runs every time
+    // isScanning flips, in either direction.
+    if (!isScanning) return;
+
     let cancelled = false;
 
     (async () => {
@@ -335,33 +351,48 @@ function useRadarEngine() {
       setBackgroundPermissionGranted(bgStatus === 'granted');
 
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
-      if (alreadyRunning) return;
+      if (alreadyRunning || cancelled) return;
 
-     await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
-      accuracy: Location.Accuracy.BestForNavigation,
-      timeInterval: LOCATION_TIME_INTERVAL_MS,
-      distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
-      activityType: Location.ActivityType.AutomotiveNavigation,
-      showsBackgroundLocationIndicator: true, // iOS: blue status-bar pill while tracking in bg
-      foregroundService: {
-        // Android: mandatory - this is the persistent notification that
-        // keeps the OS from killing the process while backgrounded.
-        notificationTitle: 'Radar alerts / تنبيهات الرادار',
-        notificationBody: 'Tracking your location for speed camera alerts.',
-      },
-    });
+      await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
+        accuracy: Location.Accuracy.BestForNavigation,
+        timeInterval: LOCATION_TIME_INTERVAL_MS,
+        distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
+        activityType: Location.ActivityType.AutomotiveNavigation,
+        showsBackgroundLocationIndicator: true, // iOS: blue status-bar pill while tracking in bg
+        foregroundService: {
+          // Android: mandatory - this is the persistent notification that
+          // keeps the OS from killing the process while backgrounded.
+          notificationTitle: 'Radar alerts / تنبيهات الرادار',
+          notificationBody: 'Tracking your location for speed camera alerts.',
+        },
+      });
     })();
 
-    // Deliberately NOT stopping updates on unmount — the entire point of
-    // this feature is to keep running when the radar screen (or the app)
-    // isn't in the foreground. Call stopRadarBackgroundTracking() yourself
-    // from wherever you want an explicit "stop tracking" control.
+    // Aggressive cleanup, on purpose: fires both when isScanning flips back
+    // to false (Stop Scan) and on unmount. Explicitly stopping the task —
+    // not just letting it dangle — is what actually clears iOS's blue
+    // location pill immediately and stops the battery drain, instead of
+    // leaving a background task running silently after the user thinks
+    // they've turned it off.
     return () => {
       cancelled = true;
+      stopRadarBackgroundTracking().catch(() => {});
     };
-  }, []);
+  }, [isScanning]);
 
-  return { location, nearbyPois, foregroundPermissionGranted, backgroundPermissionGranted, refreshPois };
+  const startScanning = useCallback(() => setIsScanning(true), []);
+  const stopScanning = useCallback(() => setIsScanning(false), []);
+
+  return {
+    location,
+    nearbyPois,
+    foregroundPermissionGranted,
+    backgroundPermissionGranted,
+    isScanning,
+    startScanning,
+    stopScanning,
+    refreshPois,
+  };
 }
 
 export function RadarProvider({ children }: { children: React.ReactNode }) {
