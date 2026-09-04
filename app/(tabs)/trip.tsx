@@ -18,20 +18,19 @@ import {
   TouchableWithoutFeedback,
   View,
 } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_DEFAULT, Region } from 'react-native-maps';
 import { isConnected, sendOBDCommand } from '../services/bleService';
 import { useLang } from './_layout';
 
 const COLORS = {
-  background: '#0B0D10',
-  card: '#15181C',
-  cardBorder: '#22262B',
+  background: '#000000',
+  card: '#050505',
+  cardBorder: '#1A1A1A',
   accent: '#00D9C6',
   accentSoft: 'rgba(0, 217, 198, 0.12)',
   danger: '#FF6B5E',
   textPrimary: '#F5F6F7',
   textSecondary: '#8A9199',
-  inputBg: '#1B1F24',
+  inputBg: '#0A0A0A',
   routeLine: '#00D9C6',
   destinationPin: '#FF6B5E',
   startPin: '#00E676',
@@ -40,12 +39,6 @@ const COLORS = {
 type Coords = { latitude: number; longitude: number };
 type Suggestion = { display_name: string; lat: string; lon: string };
 
-const DEFAULT_REGION: Region = {
-  latitude: 30.3071,
-  longitude: 31.7423,
-  latitudeDelta: 0.1,
-  longitudeDelta: 0.1,
-};
 
 const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
@@ -86,7 +79,6 @@ export default function TripCostScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
 
-  const mapRef = useRef<MapView | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Trip State ──
@@ -112,6 +104,7 @@ export default function TripCostScreen() {
   const [fuelPrice, setFuelPrice] = useState('22.25');
   const fuelPriceRef = useRef(22.25);
   useEffect(() => { fuelPriceRef.current = parseFloat(fuelPrice) || 0; }, [fuelPrice]);
+  const [carDepreciation, setCarDepreciation] = useState('1');
 
   // ── End Trip Modal State ──
   const [endModalVisible, setEndModalVisible] = useState(false);
@@ -120,6 +113,7 @@ export default function TripCostScreen() {
   const [isCalculated, setIsCalculated] = useState(false);
   
   const [recentTrips, setRecentTrips] = useState<any[]>([]);
+  const [showAllTrips, setShowAllTrips] = useState(false);
 
   // ── Load Crash Recovery & History on Mount ──
   useEffect(() => {
@@ -149,10 +143,6 @@ export default function TripCostScreen() {
       const initialCoords = { latitude: initial.coords.latitude, longitude: initial.coords.longitude };
       setCurrentLocation(initialCoords);
       
-      if (!fromCoords && !toCoords) {
-        mapRef.current?.animateToRegion({ ...initialCoords, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 500);
-      }
-
       subscription = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, timeInterval: 3000, distanceInterval: 10 },
         (loc) => setCurrentLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude })
@@ -325,24 +315,6 @@ export default function TripCostScreen() {
     setActiveField(null);
   };
 
-  const handleMapPress = async (e: { nativeEvent: { coordinate: Coords } }) => {
-    const coords = e.nativeEvent.coordinate;
-    setToCoords(coords);
-    setToText(isAr ? 'جاري جلب العنوان...' : 'Fetching address...');
-    try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${coords.latitude}&lon=${coords.longitude}&format=json`);
-      const data = await res.json();
-      if (data && data.display_name) {
-        const shortAddress = data.display_name.split(',').slice(0, 2).join(',');
-        setToText(shortAddress);
-      } else {
-        setToText(isAr ? 'تم التحديد من الخريطة' : 'Selected on Map');
-      }
-    } catch (error) {
-      setToText(isAr ? 'تم التحديد من الخريطة' : 'Selected on Map');
-    }
-  };
-
   const handleSearchRoute = async () => {
     const startNode = fromCoords || currentLocation;
     if (!startNode || !toCoords) {
@@ -354,10 +326,6 @@ export default function TripCostScreen() {
       const { coords, distanceKm } = await fetchOsrmRoute(startNode, toCoords);
       setRouteCoords(coords);
       setRouteDistanceKm(distanceKm);
-      mapRef.current?.fitToCoordinates([startNode, toCoords, ...coords], {
-        edgePadding: { top: 50, right: 50, bottom: 50, left: 50 },
-        animated: true,
-      });
     } catch (err: any) {
       Alert.alert(isAr ? 'خطأ في المسار' : 'Route Error', err.message ?? 'Could not fetch route.');
       setRouteCoords([]);
@@ -375,15 +343,12 @@ export default function TripCostScreen() {
     setRouteCoords([]);
     setRouteDistanceKm(null);
     setSuggestions([]);
-    if (currentLocation) {
-      mapRef.current?.animateToRegion({ ...currentLocation, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 400);
-    }
   };
 
   // ── Calculations ──
   const fuelPriceNum = parseFloat(fuelPrice) || 0;
   const extraCostsNum = parseFloat(extraCosts) || 0;
-  const wearTearCost = distanceKm * 1; 
+  const wearTearCost = distanceKm * (parseFloat(carDepreciation) || 0);
   const fuelCost = fuelConsumedLiters * fuelPriceNum;
 
   const totalCost = fuelCost + extraCostsNum + wearTearCost;
@@ -414,37 +379,6 @@ export default function TripCostScreen() {
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         
-        {/* ── MAP ── */}
-        <View style={styles.mapContainer}>
-          <MapView
-            ref={mapRef}
-            style={StyleSheet.absoluteFillObject}
-            provider={PROVIDER_DEFAULT}
-            mapType="satellite"
-            initialRegion={DEFAULT_REGION}
-            showsUserLocation={false}
-            onPress={handleMapPress}
-          >
-            {currentLocation && (
-              <Marker coordinate={currentLocation} anchor={{ x: 0.5, y: 0.5 }} title={isAr ? "سيارتك (مباشر)" : "Car (live)"}>
-                <View style={styles.carMarker}>
-                  <Ionicons name="car-sport" size={16} color="#0B0D10" />
-                </View>
-              </Marker>
-            )}
-            {fromCoords && <Marker coordinate={fromCoords} pinColor={COLORS.startPin} title={isAr ? "البداية" : "Start"} />}
-            {toCoords && <Marker coordinate={toCoords} pinColor={COLORS.destinationPin} title={isAr ? "الوجهة" : "Destination"} />}
-            {routeCoords.length > 0 && (
-              <Polyline coordinates={routeCoords} strokeColor={COLORS.routeLine} strokeWidth={4} />
-            )}
-          </MapView>
-          <TouchableOpacity style={styles.recenterButton} onPress={() => {
-            if (currentLocation) mapRef.current?.animateToRegion({ ...currentLocation, latitudeDelta: 0.02, longitudeDelta: 0.02 }, 400);
-          }}>
-            <Ionicons name="locate" size={20} color={COLORS.textPrimary} />
-          </TouchableOpacity>
-        </View>
-
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           
           {/* ── ROUTING CARD ── */}
@@ -544,6 +478,17 @@ export default function TripCostScreen() {
               <Text style={styles.miniConfigLabel}>{isAr ? 'جنيه' : 'EGP'}</Text>
             </View>
 
+            <View style={[styles.miniConfigRow, { flexDirection: dir }]}>
+              <Text style={styles.miniConfigLabel}>{isAr ? 'إهلاك السيارة:' : 'Car Depreciation:'}</Text>
+              <TextInput 
+                style={[styles.miniConfigInput, { textAlign: isAr ? 'right' : 'left' }]} 
+                keyboardType="decimal-pad" 
+                value={carDepreciation} 
+                onChangeText={setCarDepreciation} 
+              />
+              <Text style={styles.miniConfigLabel}>{isAr ? 'جنيه/كم' : 'EGP/km'}</Text>
+            </View>
+
             <View style={[styles.statsRow, { flexDirection: dir }]}>
               <StatBlock label={isAr ? 'المسافة' : 'Distance'} value={distanceKm.toFixed(1)} unit={isAr ? 'كم' : 'km'} />
               <StatBlock label={isAr ? 'الوقود المحترق' : 'Fuel Used'} value={fuelConsumedLiters.toFixed(2)} unit={isAr ? 'لتر' : 'L'} />
@@ -553,7 +498,7 @@ export default function TripCostScreen() {
             <View style={[styles.wearTearNote, { flexDirection: dir }]}>
               <Ionicons name="build-outline" size={14} color={COLORS.textSecondary} />
               <Text style={[styles.wearTearNoteText, { textAlign: isAr ? 'right' : 'left' }]}>
-                {isAr ? `إهلاك السيارة الكلي (١ جنيه/كم): ${wearTearCost.toFixed(2)} جنيه` : `Total Wear & tear (1 EGP/km): ${wearTearCost.toFixed(2)} EGP`}
+                {isAr ? `إهلاك السيارة الكلي (${carDepreciation || 0} جنيه/كم): ${wearTearCost.toFixed(2)} جنيه` : `Total Wear & tear (${carDepreciation || 0} EGP/km): ${wearTearCost.toFixed(2)} EGP`}
               </Text>
             </View>
           </View>
@@ -580,11 +525,11 @@ export default function TripCostScreen() {
               <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
                 {isAr ? 'سجل الرحلات (آخر 10)' : 'Trip History (Last 10)'}
               </Text>
-              {recentTrips.map((trip) => (
+              {recentTrips.slice(0, showAllTrips ? 10 : 3).map((trip) => (
                 <View key={trip.id} style={{ borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder, paddingVertical: 12 }}>
                   <View style={{ flexDirection: dir, justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
                     <Text style={{ color: COLORS.textPrimary, fontSize: 14, fontWeight: '700', flex: 1, textAlign: isAr ? 'right' : 'left' }}>
-                      {trip.from} <Ionicons name={isAr ? "arrow-back" : "arrow-forward"} size={12} color={COLORS.textSecondary} /> {trip.to}
+                      {(typeof trip.distanceKm === 'number' ? trip.distanceKm.toFixed(1) : '0.0')} {isAr ? 'كم' : 'km'}
                     </Text>
                     <View style={{ flexDirection: dir, alignItems: 'center', gap: 12 }}>
                       <Text style={{ color: COLORS.accent, fontSize: 15, fontWeight: '800' }}>{trip.cost} {isAr ? 'ج' : 'EGP'}</Text>
@@ -596,6 +541,14 @@ export default function TripCostScreen() {
                   <Text style={{ color: COLORS.textSecondary, fontSize: 11, textAlign: isAr ? 'right' : 'left' }}>{trip.date}</Text>
                 </View>
               ))}
+              {recentTrips.length > 3 && (
+                <TouchableOpacity style={styles.showMoreButton} onPress={() => setShowAllTrips((prev) => !prev)}>
+                  <Text style={styles.showMoreButtonText}>
+                    {showAllTrips ? (isAr ? 'عرض أقل' : 'Show Less') : (isAr ? 'المزيد' : 'Show More')}
+                  </Text>
+                  <Ionicons name={showAllTrips ? 'chevron-up' : 'chevron-down'} size={16} color={COLORS.accent} />
+                </TouchableOpacity>
+              )}
             </View>
           )}
 
@@ -706,9 +659,6 @@ function StatBlock({ label, value, unit }: { label: string; value: string; unit:
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
   flex: { flex: 1 },
-  mapContainer: { height: '42%', width: '100%', backgroundColor: COLORS.card, overflow: 'hidden' },
-  carMarker: { width: 28, height: 28, borderRadius: 14, backgroundColor: COLORS.accent, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#0B0D10' },
-  recenterButton: { position: 'absolute', bottom: 12, right: 12, width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(21,24,28,0.9)', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.cardBorder },
   container: { padding: 16, paddingBottom: 40 },
   card: { backgroundColor: COLORS.card, borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: COLORS.cardBorder },
   cardHeaderRow: { alignItems: 'center', marginBottom: 14, gap: 8 },
@@ -769,4 +719,7 @@ const styles = StyleSheet.create({
   
   closeModalBtn: { marginTop: 16, paddingVertical: 12, alignItems: 'center' },
   closeModalText: { color: COLORS.textSecondary, fontSize: 15, fontWeight: '600' },
+
+  showMoreButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 8, paddingVertical: 10, borderRadius: 10, backgroundColor: COLORS.accentSoft, borderWidth: 1, borderColor: 'rgba(0, 217, 198, 0.3)' },
+  showMoreButtonText: { color: COLORS.accent, fontSize: 13, fontWeight: '700' },
 });

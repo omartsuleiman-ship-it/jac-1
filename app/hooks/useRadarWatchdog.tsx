@@ -31,6 +31,17 @@ const LOCATION_DISTANCE_INTERVAL_M = 1; // 1m — was 15, too coarse for real-ti
 // or even trigger a false "you're speeding" smart alert.
 export const SPEED_NOISE_GATE_KMH = 5;
 
+// ── Smart Caching / Pre-fetch ──
+// NEARBY_RADIUS_KM above is the render slice; this is the POI source's
+// fetch radius. Once the driver has crossed 70% of it since the last fetch
+// center, refresh in the background so there's never a blind spot at the edge.
+const POI_FETCH_RADIUS_KM = 10;
+const PREFETCH_TRIGGER_KM = POI_FETCH_RADIUS_KM * 0.7; // 7km
+
+// ── Smart Idle (CPU/battery throttle) ──
+const IDLE_SPEED_THRESHOLD_KMH = SPEED_NOISE_GATE_KMH;
+const IDLE_AFTER_MS = 40000; // 40 consecutive seconds stationary before we start skipping work
+
 // ── Storage keys ──
 // This one is NOT namespaced to the radar feature on purpose: it must match
 // STORAGE_KEY in app/(tabs)/_layout.tsx exactly, because the background task
@@ -64,6 +75,25 @@ const subscribeToRadarLocation = (cb: LocationListener) => {
     uiListeners.delete(cb);
   };
 };
+
+// Module-level (not React state) on purpose: the background TaskManager
+// task can run headless with no React tree mounted, so this is the only
+// thing both it and any mounted screen can share to agree on "are we idle".
+let stationarySinceMs: number | null = null;
+let radarIsIdle = false;
+
+const updateIdleTracking = (speedKmh: number): boolean => {
+  if (speedKmh >= IDLE_SPEED_THRESHOLD_KMH) {
+    stationarySinceMs = null;
+    radarIsIdle = false;
+    return false;
+  }
+  if (stationarySinceMs === null) stationarySinceMs = Date.now();
+  radarIsIdle = Date.now() - stationarySinceMs >= IDLE_AFTER_MS;
+  return radarIsIdle;
+};
+
+export const isRadarIdle = () => radarIsIdle;
 
 interface LastAlertMemory {
   id: string;
@@ -187,6 +217,12 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const rawSpeedKmh = speed && speed > 0 ? speed * 3.6 : 0;
   const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
 
+  // Smart Idle: once parked for 40+ consecutive seconds, skip the heavy
+  // proximity math below entirely (bounding box + Haversine + bearing per
+  // candidate) — nothing is moving, so there's nothing new to alert on.
+  // Speed crossing back above the threshold resumes normal checks on the very next fix.
+  if (updateIdleTracking(speedKmh)) return;
+
   // Read settings fresh every invocation. This task may run in a headless
   // JS instance with nothing else mounted, so it can't read React context —
   // it reads the same AsyncStorage keys the foreground UI writes to.
@@ -263,6 +299,7 @@ interface RadarContextValue {
   smartAlertsEnabled: boolean;
   setSmartAlertsEnabled: (val: boolean) => void;
   refreshPois: () => Promise<void>; // call after saving a new user POI
+  isIdle: boolean; // true after 40s+ stationary — heavy proximity/UI work is being skipped
 }
 
 const RadarContext = createContext<RadarContextValue | null>(null);
@@ -290,13 +327,20 @@ function useRadarEngine() {
   // without this, a newly-saved POI wouldn't render until the next GPS tick,
   // which could be many seconds away or not come at all while stationary.
   const lastLocationRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  // Center point of the last POI fetch — compared against the live fix to
+  // decide when a pre-fetch is due (see PREFETCH_TRIGGER_KM).
+  const lastFetchCenterRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const [isIdle, setIsIdle] = useState(false);
+  const isIdleRef = useRef(false);
 
-  const refreshPois = useCallback(async () => {
+  const refreshPois = useCallback(async (center?: { latitude: number; longitude: number }) => {
     const userPois = await loadUserPois();
     allPoisRef.current = [...getStaticPois(), ...userPois];
-    if (lastLocationRef.current) {
+    const fetchCenter = center ?? lastLocationRef.current;
+    if (fetchCenter) {
+      lastFetchCenterRef.current = fetchCenter;
       setNearbyPois(
-        boundingBoxFilter(allPoisRef.current, lastLocationRef.current.latitude, lastLocationRef.current.longitude, NEARBY_RADIUS_KM)
+        boundingBoxFilter(allPoisRef.current, fetchCenter.latitude, fetchCenter.longitude, NEARBY_RADIUS_KM)
       );
     }
   }, []);
@@ -343,13 +387,38 @@ function useRadarEngine() {
   useEffect(() => {
     const unsubscribe = subscribeToRadarLocation((loc) => {
       setLocation(loc);
-      lastLocationRef.current = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
-      setNearbyPois(
-        boundingBoxFilter(allPoisRef.current, loc.coords.latitude, loc.coords.longitude, NEARBY_RADIUS_KM)
-      );
+      const { latitude, longitude, speed } = loc.coords;
+      lastLocationRef.current = { latitude, longitude };
+
+      const rawSpeedKmh = speed && speed > 0 ? speed * 3.6 : 0;
+      const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
+
+      // Smart Idle: mirrors the background task's gate. While parked 40s+,
+      // skip the bounding-box filter and pre-fetch distance check below —
+      // nothing worth spending CPU/battery on until the car moves again.
+      const idleNow = updateIdleTracking(speedKmh);
+      if (idleNow !== isIdleRef.current) {
+        isIdleRef.current = idleNow;
+        setIsIdle(idleNow);
+      }
+      if (idleNow) return;
+
+      // Smart Caching / Pre-fetch: only re-hit the POI source once the
+      // driver has drifted 7km (70% of the 10km fetch radius) from where
+      // the last batch was centered, instead of on every single GPS tick.
+      const center = lastFetchCenterRef.current;
+      const driftedKm = center
+        ? haversineMeters(center.latitude, center.longitude, latitude, longitude) / 1000
+        : Infinity;
+
+      if (driftedKm >= PREFETCH_TRIGGER_KM) {
+        refreshPois({ latitude, longitude }).catch(() => {});
+      } else {
+        setNearbyPois(boundingBoxFilter(allPoisRef.current, latitude, longitude, NEARBY_RADIUS_KM));
+      }
     });
     return unsubscribe;
-  }, []);
+  }, [refreshPois]);
 
   useEffect(() => {
     // Manual scan toggle: don't touch permissions or start anything until
@@ -426,6 +495,7 @@ function useRadarEngine() {
     startScanning,
     stopScanning,
     refreshPois,
+    isIdle,
   };
 }
 

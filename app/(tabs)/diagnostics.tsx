@@ -135,16 +135,21 @@ type LiveParamMeta = {
   labelEn: string;
   labelAr: string;
   category: 'engine' | 'safety';
+  // 'fast' = needs near-instant feedback (polled ~1s); 'slow' = changes
+  // gradually and is safe to poll ~4s — this is what lets the OBD loop
+  // below skip the slow group on most ticks instead of hitting the ELM327
+  // with every PID every second.
+  pollGroup: 'fast' | 'slow';
 };
 
 const LIVE_PARAMS: LiveParamMeta[] = [
-  { id: 'rpm', icon: 'speedometer-outline', labelEn: 'Engine RPM', labelAr: 'سرعة دوران المحرك', category: 'engine' },
-  { id: 'coolant', icon: 'thermometer-outline', labelEn: 'Coolant Temp', labelAr: 'حرارة المحرك', category: 'engine' },
-  { id: 'voltage', icon: 'battery-charging-outline', labelEn: 'Battery Volt', labelAr: 'جهد البطارية', category: 'engine' },
-  { id: 'engineLoad', icon: 'speedometer', labelEn: 'Engine Load', labelAr: 'حمل المحرك', category: 'engine' },
-  { id: 'maf', icon: 'flash-outline', labelEn: 'MAF Flow', labelAr: 'تدفق الهواء', category: 'engine' },
-  { id: 'o2', icon: 'analytics-outline', labelEn: 'O2 Sensor', labelAr: 'الأكسجين', category: 'engine' },
-  { id: 'fuelTrim', icon: 'options-outline', labelEn: 'Fuel Trim', labelAr: 'ضبط الوقود', category: 'engine' },
+  { id: 'rpm', icon: 'speedometer-outline', labelEn: 'Engine RPM', labelAr: 'سرعة دوران المحرك', category: 'engine', pollGroup: 'fast' },
+  { id: 'coolant', icon: 'thermometer-outline', labelEn: 'Coolant Temp', labelAr: 'حرارة المحرك', category: 'engine', pollGroup: 'slow' },
+  { id: 'voltage', icon: 'battery-charging-outline', labelEn: 'Battery Volt', labelAr: 'جهد البطارية', category: 'engine', pollGroup: 'slow' },
+  { id: 'engineLoad', icon: 'speedometer', labelEn: 'Engine Load', labelAr: 'حمل المحرك', category: 'engine', pollGroup: 'fast' },
+  { id: 'maf', icon: 'flash-outline', labelEn: 'MAF Flow', labelAr: 'تدفق الهواء', category: 'engine', pollGroup: 'fast' },
+  { id: 'o2', icon: 'analytics-outline', labelEn: 'O2 Sensor', labelAr: 'الأكسجين', category: 'engine', pollGroup: 'slow' },
+  { id: 'fuelTrim', icon: 'options-outline', labelEn: 'Fuel Trim', labelAr: 'ضبط الوقود', category: 'engine', pollGroup: 'slow' },
 ];
 
 const DEFAULT_SELECTED_PARAMS: LiveParamId[] = ['rpm', 'coolant', 'voltage'];
@@ -340,50 +345,94 @@ export default function DiagnosticsScreen() {
   // ---------------------------------------------------------------------------
   // Live Data & Multi-ECU Polling
   // ---------------------------------------------------------------------------
-  const fetchLiveDataWrapper = useCallback(async (isInitial = false) => {
-    const engineKeys = LIVE_PARAMS.filter((p) => p.category === 'engine' && selectedParams.has(p.id)).map((p) => p.id) as LiveDataKey[];
-    if (engineKeys.length === 0) return; // nothing engine-side selected — skip the round trip entirely
-
-    if (isInitial) setIsLiveDataLoading(true);
+  // Fetches just the given PID group and merges the result into liveData —
+  // merging (not replacing) is what lets fast-only ticks run without
+  // wiping out the last known slow-group readings (coolant, voltage, etc).
+  const fetchLiveDataWrapper = useCallback(async (keys: LiveDataKey[]) => {
+    if (keys.length === 0) return;
     try {
-      const data = await getLiveData(engineKeys);
-      setLiveData(data);
+      const data = await getLiveData(keys);
+      setLiveData((prev) => ({ ...prev, ...data }));
     } catch (error) {
       console.warn('Failed to fetch live data:', error);
-    } finally {
-      if (isInitial) setIsLiveDataLoading(false);
     }
-  }, [selectedParams]);
+  }, []);
 
-  // Poll engine live data only. Transmission/ATF is no longer part of any
-  // continuous loop — getExtraSafetyData is only invoked from the manual
-  // DTC Scanning flow in this file now.
+  // Split-frequency OBD polling. RPM / Engine Load / MAF need near-instant
+  // feedback (~1s); Coolant / Voltage / O2 / Fuel Trim drift slowly and are
+  // safe at ~4s. Both groups still share ONE serialized loop — the ELM327
+  // link is a single half-duplex UART/BLE channel, so a real second
+  // setInterval for the slow group would race the fast group's in-flight
+  // command and corrupt/garble responses. Here the slow group is simply
+  // appended onto a fast tick once it's due, never run concurrently with it.
   useEffect(() => {
     let cancelled = false;
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
-    const FAST_INTERVAL_MS = 800;
+    let isBusy = false; // hard lock: never let a new tick start while a BLE round trip is still in flight
+    let lastSlowFetchAt = 0;
 
-    const runPollLoop = async () => {
-      if (cancelled) return;
-      await fetchLiveDataWrapper(true);
+    const FAST_INTERVAL_MS = 1000;
+    const SLOW_INTERVAL_MS = 4000;
 
-      const tick = async () => {
+    const fastKeys = LIVE_PARAMS.filter(
+      (p) => p.category === 'engine' && p.pollGroup === 'fast' && selectedParams.has(p.id)
+    ).map((p) => p.id) as LiveDataKey[];
+    const slowKeys = LIVE_PARAMS.filter(
+      (p) => p.category === 'engine' && p.pollGroup === 'slow' && selectedParams.has(p.id)
+    ).map((p) => p.id) as LiveDataKey[];
+
+    const shouldRun =
+      activeView === 'LIVE_DATA' && liveDataMode === 'dashboard' && (fastKeys.length > 0 || slowKeys.length > 0);
+
+    const runInitial = async () => {
+      setIsLiveDataLoading(true);
+      isBusy = true;
+      try {
+        // Sequential on purpose — one PID group finishes on the wire before the next starts.
+        await fetchLiveDataWrapper(fastKeys);
         if (cancelled) return;
-        const tickStart = Date.now();
-
-        await fetchLiveDataWrapper(false);
-        if (cancelled) return;
-
-        const elapsed = Date.now() - tickStart;
-        const delay = Math.max(0, FAST_INTERVAL_MS - elapsed);
-        pollTimeout = setTimeout(tick, delay);
-      };
-
-      pollTimeout = setTimeout(tick, FAST_INTERVAL_MS);
+        await fetchLiveDataWrapper(slowKeys);
+        lastSlowFetchAt = Date.now();
+      } finally {
+        isBusy = false;
+        if (!cancelled) setIsLiveDataLoading(false);
+      }
     };
 
-    if (activeView === 'LIVE_DATA' && liveDataMode === 'dashboard' && selectedParams.size > 0) {
-      runPollLoop();
+    const tick = async () => {
+      if (cancelled) return;
+      const tickStart = Date.now();
+
+      // If the previous round trip is still running (slow ELM327 response,
+      // dropped packet, etc.) skip this tick entirely rather than queuing a
+      // second request behind it — that's what would eventually block/desync
+      // the Bluetooth link.
+      if (!isBusy) {
+        isBusy = true;
+        try {
+          await fetchLiveDataWrapper(fastKeys);
+          if (cancelled) return;
+
+          const dueForSlow = slowKeys.length > 0 && Date.now() - lastSlowFetchAt >= SLOW_INTERVAL_MS;
+          if (dueForSlow) {
+            await fetchLiveDataWrapper(slowKeys);
+            lastSlowFetchAt = Date.now();
+          }
+        } finally {
+          isBusy = false;
+        }
+      }
+
+      if (cancelled) return;
+      const elapsed = Date.now() - tickStart;
+      const delay = Math.max(0, FAST_INTERVAL_MS - elapsed);
+      pollTimeout = setTimeout(tick, delay);
+    };
+
+    if (shouldRun) {
+      runInitial().then(() => {
+        if (!cancelled) pollTimeout = setTimeout(tick, FAST_INTERVAL_MS);
+      });
     }
 
     return () => {

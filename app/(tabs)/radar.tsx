@@ -54,6 +54,9 @@ export default function RadarScreen() {
   const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const mapRef = useRef<MapView>(null);
+  // 'standard' (vector tiles) uses far less GPU/battery than satellite
+  // imagery — default to it and let the user opt into satellite explicitly.
+  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
 
   const [allPois, setAllPois] = useState<RadarPoi[]>([]);
   // لما ده يبقى فيه قيمة، الماب بتعرض ردارات منطقة معينة (بحث أو نقطة
@@ -318,6 +321,10 @@ export default function RadarScreen() {
     });
   }, [location]);
 
+  const toggleMapType = useCallback(() => {
+    setMapType((prev) => (prev === 'standard' ? 'satellite' : 'standard'));
+  }, []);
+
   const poiLabel = useCallback(
     (poi: RadarPoi) => {
       if (poi.type === 'radar') {
@@ -362,7 +369,7 @@ export default function RadarScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         initialRegion={initialRegion}
-        mapType="hybrid"
+        mapType={mapType}
         showsUserLocation={false}
         showsMyLocationButton
         showsCompass
@@ -384,6 +391,10 @@ export default function RadarScreen() {
 
       <Pressable style={styles.recenterButton} onPress={handleRecenter}>
         <Ionicons name="locate" size={22} color="#FFFFFF" />
+      </Pressable>
+
+      <Pressable style={styles.layersButton} onPress={toggleMapType}>
+        <Ionicons name="layers-outline" size={22} color="#FFFFFF" />
       </Pressable>
 
       <View style={styles.topOverlay} pointerEvents="box-none">
@@ -703,6 +714,19 @@ const styles = StyleSheet.create({
   recenterButton: {
     position: 'absolute',
     bottom: 20,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  layersButton: {
+    position: 'absolute',
+    bottom: 76,
     right: 20,
     width: 48,
     height: 48,
