@@ -38,7 +38,14 @@ export const SPEED_NOISE_GATE_KMH = 5;
 // — it reads the same key the language toggle already persists to.
 const LANGUAGE_STORAGE_KEY = 'app_language';
 const SMART_ALERTS_STORAGE_KEY = '@radar_map/smart_alerts_v1';
-const ALERT_DEBOUNCE_STORAGE_KEY = '@radar_map/alert_debounce_v1';
+// Replaces the old per-camera-id debounce map. Instead of remembering every
+// camera ever alerted, this remembers only the SINGLE most recent alert
+// (which POI, where, and the heading at that moment) — just enough to spot
+// "this new candidate is the twin-lane copy of the one I just played",
+// without permanently blocking a genuine return-trip camera after a U-turn.
+const ALERT_MEMORY_STORAGE_KEY = '@radar_map/last_alert_memory_v1';
+const TWIN_RADAR_RADIUS_M = 100; // parallel-lane radars mapped this close are treated as one alert
+const U_TURN_HEADING_DELTA_DEG = 90; // heading swing past this = a genuine U-turn, not just a curve
 
 export const RADAR_LOCATION_TASK = 'radar-background-location-task';
 
@@ -58,22 +65,32 @@ const subscribeToRadarLocation = (cb: LocationListener) => {
   };
 };
 
-type DebounceMap = Record<string, number>;
+interface LastAlertMemory {
+  id: string;
+  latitude: number;
+  longitude: number;
+  heading: number; // vehicle heading at the moment this alert fired
+  timestamp: number;
+}
 
-const loadDebounceMap = async (): Promise<DebounceMap> => {
+const loadLastAlertMemory = async (): Promise<LastAlertMemory | null> => {
   try {
-    const raw = await AsyncStorage.getItem(ALERT_DEBOUNCE_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as DebounceMap) : {};
+    const raw = await AsyncStorage.getItem(ALERT_MEMORY_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as LastAlertMemory) : null;
   } catch {
-    return {};
+    return null;
   }
 };
 
-const saveDebounceMap = async (map: DebounceMap) => {
+const saveLastAlertMemory = async (memory: LastAlertMemory | null) => {
   try {
-    await AsyncStorage.setItem(ALERT_DEBOUNCE_STORAGE_KEY, JSON.stringify(map));
+    if (memory) {
+      await AsyncStorage.setItem(ALERT_MEMORY_STORAGE_KEY, JSON.stringify(memory));
+    } else {
+      await AsyncStorage.removeItem(ALERT_MEMORY_STORAGE_KEY);
+    }
   } catch {
-    // Best-effort — a failed write just risks one camera re-alerting a bit early.
+    // Best-effort — worst case a twin-lane radar isn't muted once, or a stale mute lingers briefly.
   }
 };
 
@@ -187,34 +204,51 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const candidates = boundingBoxFilter(allPois, latitude, longitude, BOUNDING_BOX_KM);
   if (candidates.length === 0) return;
 
-  const debounceMap = await loadDebounceMap();
-  const now = Date.now();
-  let debounceDirty = false;
+   let activeAlert = await loadLastAlertMemory();
+  let alertMemoryDirty = false;
 
   for (const poi of candidates) {
     if (poi.type !== 'radar') continue; // bumps/comments are map-only, no TTS
     const distance = haversineMeters(latitude, longitude, poi.latitude, poi.longitude);
     if (distance > ALERT_RADIUS_M) continue;
 
-    // heading is -1 (or unset) when the device has no reliable course —
-    // typically stationary or a weak fix. Skip the forward-facing check
-    // rather than risk never alerting at all.
-    if (heading !== null && heading !== undefined && heading >= 0) {
-      const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
-      if (angularDiff(heading, bearing) >= FORWARD_CONE_DEG) continue;
-    }
+    // Strict forward-only: if heading isn't reliable (device stationary or
+    // a weak GPS course estimate — heading is -1/null then), do NOT alert.
+    // This used to fall through and alert anyway, which is exactly what let
+    // cameras on side roads or behind the car through.
+    if (heading === null || heading === undefined || heading < 0) continue;
+    const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
+    if (angularDiff(heading, bearing) > FORWARD_CONE_DEG) continue;
 
-    const last = debounceMap[poi.id] ?? 0;
-    if (now - last < ALERT_DEBOUNCE_MS) continue;
+    // Twin-radar mute + U-turn bypass. Distance is measured POI-to-POI
+    // (this candidate vs. the last alerted radar's own coordinates) — twin
+    // parallel-lane radars sit close to EACH OTHER, not necessarily close
+    // to the driver at the moment of this re-check.
+    if (activeAlert) {
+      const headingSwing = angularDiff(heading, activeAlert.heading);
+      const isUTurn = headingSwing > U_TURN_HEADING_DELTA_DEG;
+      if (isUTurn) {
+        activeAlert = null; // instantly clear — the return-trip radar must be detected
+      } else {
+        const distanceToActive = haversineMeters(
+          poi.latitude,
+          poi.longitude,
+          activeAlert.latitude,
+          activeAlert.longitude
+        );
+        const stillFresh = Date.now() - activeAlert.timestamp < ALERT_DEBOUNCE_MS;
+        if (distanceToActive <= TWIN_RADAR_RADIUS_M && stillFresh) continue; // muted: twin-lane radar
+      }
+    }
 
     if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
       await playRadarSound(poi, isAr);
-      debounceMap[poi.id] = now;
-      debounceDirty = true;
+      activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
+      alertMemoryDirty = true;
     }
   }
 
-  if (debounceDirty) await saveDebounceMap(debounceMap);
+  if (alertMemoryDirty) await saveLastAlertMemory(activeAlert);
 });
 
 // ── Context ──

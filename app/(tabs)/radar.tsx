@@ -110,6 +110,15 @@ export default function RadarScreen() {
     });
   }, [location]);
 
+  // Heading-up (nav-style) rotation: only while actively scanning, so the
+  // map doesn't spin on its own when the feature isn't running.
+  useEffect(() => {
+    if (!isScanning || !location || !mapRef.current) return;
+    const heading = location.coords.heading;
+    if (heading === null || heading === undefined || heading < 0) return; // unreliable course — don't rotate on noise
+    mapRef.current.animateCamera({ heading, pitch: 45 });
+  }, [location, isScanning]);
+
   const handleLongPress = useCallback((e: any) => {
     setPendingCoords(e.nativeEvent.coordinate);
     setModalVisible(true);
