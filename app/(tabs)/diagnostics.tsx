@@ -352,7 +352,24 @@ export default function DiagnosticsScreen() {
     if (keys.length === 0) return;
     try {
       const data = await getLiveData(keys);
-      setLiveData((prev) => ({ ...prev, ...data }));
+      setLiveData((prev) => {
+        const next = { ...prev };
+        // Only touch fields THIS call actually requested, and only when a
+        // real reading came back. getLiveData() always returns every field
+        // in its return object (null / 0 defaults for anything not in
+        // `keys`) — spreading the whole object in was letting an
+        // unrequested slow field (or a genuinely failed PID) null-out /
+        // zero-out the last known-good value on every fast-only tick. The
+        // UI should always show the last real reading, never flicker back
+        // to "Waiting..." once one has arrived.
+        for (const key of keys) {
+          const value = (data as Record<LiveDataKey, number | null>)[key];
+          if (value !== null && value !== undefined) {
+            (next as Record<LiveDataKey, number | null>)[key] = value;
+          }
+        }
+        return next;
+      });
     } catch (error) {
       console.warn('Failed to fetch live data:', error);
     }
@@ -369,10 +386,11 @@ export default function DiagnosticsScreen() {
     let cancelled = false;
     let pollTimeout: ReturnType<typeof setTimeout> | null = null;
     let isBusy = false; // hard lock: never let a new tick start while a BLE round trip is still in flight
-    let lastSlowFetchAt = 0;
+    let tick = 0;
+    let hasCompletedFirstTick = false;
 
     const FAST_INTERVAL_MS = 1000;
-    const SLOW_INTERVAL_MS = 4000;
+    const SLOW_EVERY_N_TICKS = 5; // slow group piggybacks onto every 5th fast tick (~5s at a 1s tick rate)
 
     const fastKeys = LIVE_PARAMS.filter(
       (p) => p.category === 'engine' && p.pollGroup === 'fast' && selectedParams.has(p.id)
@@ -384,55 +402,51 @@ export default function DiagnosticsScreen() {
     const shouldRun =
       activeView === 'LIVE_DATA' && liveDataMode === 'dashboard' && (fastKeys.length > 0 || slowKeys.length > 0);
 
-    const runInitial = async () => {
-      setIsLiveDataLoading(true);
+    // Single Master Loop, one tick counter. EVERY tick queues the fast
+    // parameters; only when tick % 5 === 0 do the slow parameters get
+    // appended onto the SAME sequential request — one getLiveData() call,
+    // one queue, each command fully awaited before the next goes out. No
+    // second loop ever exists, so the ELM327's half-duplex link can never
+    // see two commands in flight at once.
+    const runTick = async () => {
+      if (cancelled) return;
+
+      if (isBusy) {
+        // Previous round trip still in flight (slow ELM327 reply, dropped
+        // packet, etc.) — reschedule without starting a second one; queuing
+        // a competing request here is exactly what causes bus collisions.
+        pollTimeout = setTimeout(runTick, FAST_INTERVAL_MS);
+        return;
+      }
+
+      const tickStart = Date.now();
       isBusy = true;
+      tick += 1;
+
       try {
-        // Sequential on purpose — one PID group finishes on the wire before the next starts.
-        await fetchLiveDataWrapper(fastKeys);
-        if (cancelled) return;
-        await fetchLiveDataWrapper(slowKeys);
-        lastSlowFetchAt = Date.now();
+        const keysThisTick =
+          slowKeys.length > 0 && tick % SLOW_EVERY_N_TICKS === 0 ? [...fastKeys, ...slowKeys] : fastKeys;
+        await fetchLiveDataWrapper(keysThisTick);
       } finally {
         isBusy = false;
-        if (!cancelled) setIsLiveDataLoading(false);
-      }
-    };
-
-    const tick = async () => {
-      if (cancelled) return;
-      const tickStart = Date.now();
-
-      // If the previous round trip is still running (slow ELM327 response,
-      // dropped packet, etc.) skip this tick entirely rather than queuing a
-      // second request behind it — that's what would eventually block/desync
-      // the Bluetooth link.
-      if (!isBusy) {
-        isBusy = true;
-        try {
-          await fetchLiveDataWrapper(fastKeys);
-          if (cancelled) return;
-
-          const dueForSlow = slowKeys.length > 0 && Date.now() - lastSlowFetchAt >= SLOW_INTERVAL_MS;
-          if (dueForSlow) {
-            await fetchLiveDataWrapper(slowKeys);
-            lastSlowFetchAt = Date.now();
-          }
-        } finally {
-          isBusy = false;
+        // Only clears the initial loading spinner once, after the very
+        // first tick — never again, so a later slow/failed tick can't flash
+        // the loading state back on top of already-known-good readings.
+        if (!hasCompletedFirstTick) {
+          hasCompletedFirstTick = true;
+          if (!cancelled) setIsLiveDataLoading(false);
         }
       }
 
       if (cancelled) return;
       const elapsed = Date.now() - tickStart;
       const delay = Math.max(0, FAST_INTERVAL_MS - elapsed);
-      pollTimeout = setTimeout(tick, delay);
+      pollTimeout = setTimeout(runTick, delay);
     };
 
     if (shouldRun) {
-      runInitial().then(() => {
-        if (!cancelled) pollTimeout = setTimeout(tick, FAST_INTERVAL_MS);
-      });
+      setIsLiveDataLoading(true);
+      pollTimeout = setTimeout(runTick, 0);
     }
 
     return () => {
