@@ -134,14 +134,20 @@ const saveLastAlertMemory = async (memory: LastAlertMemory | null) => {
 // (ar + en) actually exist under assets/sounds/.
 const RADAR_SOUNDS: Record<'ar' | 'en', Record<number, any>> = {
   en: {
+    40: require('../assets/sounds/radar_40_en.mp3'),
+    50: require('../assets/sounds/radar_50_en.mp3'),
     60: require('../assets/sounds/radar_60_en.mp3'),
+    70: require('../assets/sounds/radar_70_en.mp3'),
     80: require('../assets/sounds/radar_80_en.mp3'),
     90: require('../assets/sounds/radar_90_en.mp3'),
     100: require('../assets/sounds/radar_100_en.mp3'),
     120: require('../assets/sounds/radar_120_en.mp3'),
   },
   ar: {
+    40: require('../assets/sounds/radar_40_ar.mp3'),
+    50: require('../assets/sounds/radar_50_ar.mp3'),
     60: require('../assets/sounds/radar_60_ar.mp3'),
+    70: require('../assets/sounds/radar_70_ar.mp3'),
     80: require('../assets/sounds/radar_80_ar.mp3'),
     90: require('../assets/sounds/radar_90_ar.mp3'),
     100: require('../assets/sounds/radar_100_ar.mp3'),
@@ -181,10 +187,34 @@ const playRadarSound = async (poi: RadarPoi, isAr: boolean) => {
       await currentSound.unloadAsync().catch(() => {});
       currentSound = null;
     }
+
+    // Re-assert DuckOthers right before every play — a PREVIOUS alert may
+    // have already reset the session to MixWithOthers on finish (see the
+    // status listener below), so DuckOthers can't be assumed still active.
+    // staysActiveInBackground + playsInSilentModeIOS stay on continuously —
+    // this is what lets iOS mix the clip into an active phone call route
+    // (or play with the ringer switched to silent), same as Google Maps nav.
+    await Audio.setAudioModeAsync({
+      staysActiveInBackground: true,
+      playsInSilentModeIOS: true,
+      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+      shouldDuckAndroid: true,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+    });
+
     const { sound } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
     currentSound = sound;
     sound.setOnPlaybackStatusUpdate((status) => {
       if (status.isLoaded && status.didJustFinish) {
+        // Explicitly stop ducking — without this, whatever got ducked
+        // (Spotify, Apple Music, podcasts, a call) stays lowered
+        // indefinitely instead of restoring once the clip ends.
+        Audio.setAudioModeAsync({
+          staysActiveInBackground: true,
+          playsInSilentModeIOS: true,
+          interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
+          shouldDuckAndroid: false,
+        }).catch((err) => console.warn('[Radar] failed to reset audio mode after alert:', err));
         sound.unloadAsync().catch(() => {});
         if (currentSound === sound) currentSound = null;
       }

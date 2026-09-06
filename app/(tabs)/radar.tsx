@@ -107,13 +107,20 @@ export default function RadarScreen() {
     });
   }, [location]);
 
-  // Heading-up (nav-style) rotation: only while actively scanning, so the
-  // map doesn't spin on its own when the feature isn't running.
+  // True Course-Up (nav-style) rotation: only while actively scanning, so
+  // the map doesn't spin on its own when the feature isn't running. Also
+  // re-centers on every fix — heading alone (without moving the center to
+  // match) is what made the road look tilted/off-vertical as the car moved
+  // between fixes without the viewport recentering under it.
   useEffect(() => {
     if (!isScanning || !location || !mapRef.current) return;
-    const heading = location.coords.heading;
+    const heading = location.coords.heading; // GPS course/trajectory, NOT magnetic compass
     if (heading === null || heading === undefined || heading < 0) return; // unreliable course — don't rotate on noise
-    mapRef.current.animateCamera({ heading, pitch: 45 });
+    mapRef.current.animateCamera({
+      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+      heading,
+      pitch: 50,
+    });
   }, [location, isScanning]);
 
   const handleLongPress = useCallback((e: any) => {
