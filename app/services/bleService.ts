@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
+import { setObdSpeedKmh } from './obdSpeedStore';
 
 // ── BLE Manager ──
 // restoreStateIdentifier is what actually lets iOS relaunch/reattach this app
@@ -352,6 +353,7 @@ export const setOBDDevice = async (device: Device) => {
   disconnectSubscription = device.onDisconnected(() => {
     console.log('[BLE] Device disconnected — capturing last-parked location');
     captureLastParkedLocation();
+    stopObdSpeedPolling();
     connectedDevice = null;
     writeCharacteristic = null;
     notifyCharacteristic = null;
@@ -381,6 +383,7 @@ export const setOBDDevice = async (device: Device) => {
     startNotifyListener();
     await initializeELM327();
     await fetchAndSaveTrueOdometer();
+    startObdSpeedPolling();
   } catch (error: any) {
     console.error(error);
     Alert.alert('BLE Exception', error?.message ?? String(error));
@@ -437,6 +440,7 @@ export const disconnectBleDevice = async (deviceId: string) => {
     // A harmless duplicate write from the listener firing shortly after is
     // fine; a missed one isn't.
     captureLastParkedLocation();
+    stopObdSpeedPolling();
 
     disconnectSubscription?.remove();
     disconnectSubscription = null;
@@ -689,9 +693,57 @@ const requestPID = async (pid: string): Promise<number | null> => {
     case '0106':
       if (numbers.length < 1) return null;
       return (numbers[0] - 128) * 100 / 128;
+    case '010D': // Vehicle Speed (km/h) — single byte, value IS the speed directly
+      if (numbers.length < 1) return null;
+      return numbers[0];
     default:
       return null;
   }
+};
+
+// ── Dedicated Vehicle Speed (PID 01 0D) polling loop ──
+// سرعة الـ GPS متأخرة 1-5 ثواني عن الحقيقة، مرفوض لتنبيه رادار — الحلقة دي
+// بتغذي obdSpeedStore مباشرة من الـ ECU. شغالة على recursive setTimeout
+// (مش setInterval) عشان رد بطيء ميعملش overlap مع الطلب اللي بعده؛ كل أمر
+// OBD فعلي لسه بيعدي من نفس طابور sendOBDCommand -> queueRawCommand بتاع
+// باقي الملف، يعني مستحيل يتعارض مع RPM/coolant/voltage أو أي فحص أعطال.
+const OBD_SPEED_POLL_INTERVAL_MS = 300;
+let speedPollingActive = false;
+let speedPollTimeout: ReturnType<typeof setTimeout> | null = null;
+
+const speedPollTick = async () => {
+  if (!speedPollingActive) return;
+
+  // نفس القفل اللي بتستخدمه getLiveData — لو مودیول تاني (فحص الجير، فحص
+  // الأمان) واخد الـ header دلوقتي، نتخطى الدورة دي بدل ما نخاطر إن PID
+  // السرعة يوصل لـ ECU غلط؛ الدورة اللي بعدها بتحاول تاني بعد وقت قصير.
+  if (!isSequenceActive && writeCharacteristic && notifyCharacteristic) {
+    try {
+      const kmh = await requestPID('010D');
+      if (kmh !== null) setObdSpeedKmh(kmh);
+    } catch (error) {
+      console.warn('[BLE] Speed PID (010D) poll failed:', error);
+    }
+  }
+
+  if (speedPollingActive) {
+    speedPollTimeout = setTimeout(speedPollTick, OBD_SPEED_POLL_INTERVAL_MS);
+  }
+};
+
+export const startObdSpeedPolling = () => {
+  if (speedPollingActive) return; // شغالة بالفعل — منمنعش تشغيل حلقتين فوق بعض
+  speedPollingActive = true;
+  speedPollTick();
+};
+
+export const stopObdSpeedPolling = () => {
+  speedPollingActive = false;
+  if (speedPollTimeout) {
+    clearTimeout(speedPollTimeout);
+    speedPollTimeout = null;
+  }
+  setObdSpeedKmh(0); // مفيش قراءة حية دلوقتي — منسيبش سرعة قديمة ظاهرة وهمية
 };
 
 export const getReadiness = async () => {
