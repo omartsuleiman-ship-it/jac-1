@@ -3,6 +3,7 @@ import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { getObdSpeedKmh, subscribeObdSpeed } from '../services/obdSpeedStore';
 import {
   RadarPoi,
   angularDiff,
@@ -219,8 +220,10 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   // Feed any mounted screen (map/speedometer) with this same fix.
   uiListeners.forEach((cb) => cb(loc));
 
-  const { latitude, longitude, heading, speed } = loc.coords;
-  const rawSpeedKmh = speed && speed > 0 ? speed * 3.6 : 0;
+  const { latitude, longitude, heading } = loc.coords;
+  // السرعة مصدرها OBD2 حصريًا (obdSpeedStore)، مش هذا الـ GPS fix — سرعة الـ
+  // GPS متأخرة 1-5 ثواني عن الحقيقة، وده مرفوض لتنبيه رادار.
+  const rawSpeedKmh = getObdSpeedKmh();
   const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
 
   // Smart Idle: once parked for 40+ consecutive seconds, skip the heavy
@@ -306,6 +309,7 @@ interface RadarContextValue {
   setSmartAlertsEnabled: (val: boolean) => void;
   refreshPois: () => Promise<void>; // call after saving a new user POI
   isIdle: boolean; // true after 40s+ stationary — heavy proximity/UI work is being skipped
+  speedKmh: number; // OBD2-sourced vehicle speed — the only speed value the UI/alerts should use
 }
 
 const RadarContext = createContext<RadarContextValue | null>(null);
@@ -338,6 +342,9 @@ function useRadarEngine() {
   const lastFetchCenterRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const [isIdle, setIsIdle] = useState(false);
   const isIdleRef = useRef(false);
+  // مصدرها OBD2 (obdSpeedStore) — بتتعرض عن طريق الـ context عشان الـ UI
+  // ومنطق التنبيه ميستخدموش location.coords.speed تاني خالص.
+  const [speedKmh, setSpeedKmh] = useState(0);
 
   const refreshPois = useCallback(async (center?: { latitude: number; longitude: number }) => {
     const userPois = await loadUserPois();
@@ -390,24 +397,33 @@ function useRadarEngine() {
   // Drives the map/speedometer only — alerting lives entirely in the
   // TaskManager task above, so it behaves identically whether this screen
   // is mounted or not.
+  // السرعة بقت بتيجي حصريًا من OBD2 (obdSpeedStore) مش GPS — سرعة الـ GPS
+  // متأخرة 1-5 ثواني عن الحقيقة، مرفوض لتنبيه رادار. الـ effect ده مستقل عن
+  // نبضات الـ GPS، فالسبيدوميتر وحساب الـ idle بيستجيبوا بسرعة الـ OBD نفسها،
+  // مش لما يجي أقرب GPS fix بالصدفة.
   useEffect(() => {
-    const unsubscribe = subscribeToRadarLocation((loc) => {
-      setLocation(loc);
-      const { latitude, longitude, speed } = loc.coords;
-      lastLocationRef.current = { latitude, longitude };
+    const unsubscribe = subscribeObdSpeed((rawKmh) => {
+      const gatedKmh = rawKmh < SPEED_NOISE_GATE_KMH ? 0 : rawKmh;
+      setSpeedKmh(gatedKmh);
 
-      const rawSpeedKmh = speed && speed > 0 ? speed * 3.6 : 0;
-      const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
-
-      // Smart Idle: mirrors the background task's gate. While parked 40s+,
-      // skip the bounding-box filter and pre-fetch distance check below —
-      // nothing worth spending CPU/battery on until the car moves again.
-      const idleNow = updateIdleTracking(speedKmh);
+      const idleNow = updateIdleTracking(gatedKmh);
       if (idleNow !== isIdleRef.current) {
         isIdleRef.current = idleNow;
         setIsIdle(idleNow);
       }
-      if (idleNow) return;
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToRadarLocation((loc) => {
+      setLocation(loc);
+      const { latitude, longitude } = loc.coords;
+      lastLocationRef.current = { latitude, longitude };
+
+      // Smart Idle: حالة الـ idle بقت متحكم فيها من سرعة الـ OBD (الـ effect
+      // اللي فوق) — هنا بس بنقرأ العلم المشترك.
+      if (isRadarIdle()) return;
 
       // Smart Caching / Pre-fetch: only re-hit the POI source once the
       // driver has drifted 7km (70% of the 10km fetch radius) from where
@@ -490,7 +506,21 @@ function useRadarEngine() {
   }, [isScanning]);
 
   const startScanning = useCallback(() => setIsScanning(true), []);
-  const stopScanning = useCallback(() => setIsScanning(false), []);
+  // إيقاف صريح ومنتظر (awaited) — مش مجرد قلب الفلاج والانتظار إن الـ effect
+  // cleanup يتصرف في وقته. ده اللي بيخلي الدايرة الزرقاء في iOS تختفي فورًا
+  // لما المستخدم يدوس "إيقاف المسح"، بدل ما تفضل معلقة لحد ما React يشغّل
+  // الـ cleanup.
+  const stopScanning = useCallback(async () => {
+    setIsScanning(false);
+    try {
+      const stillRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
+      if (stillRunning) {
+        await Location.stopLocationUpdatesAsync(RADAR_LOCATION_TASK);
+      }
+    } catch (err) {
+      console.warn('[Radar] failed to stop background tracking:', err);
+    }
+  }, []);
 
   return {
     location,
@@ -502,6 +532,7 @@ function useRadarEngine() {
     stopScanning,
     refreshPois,
     isIdle,
+    speedKmh,
   };
 }
 

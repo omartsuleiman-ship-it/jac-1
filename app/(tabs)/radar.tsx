@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
-import { SPEED_NOISE_GATE_KMH, useRadar } from '../hooks/useRadarWatchdog';
+import { useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
   RadarPoiType,
@@ -47,6 +47,7 @@ export default function RadarScreen() {
     smartAlertsEnabled,
     setSmartAlertsEnabled,
     refreshPois,
+    speedKmh,
   } = useRadar();
 
   const [modalVisible, setModalVisible] = useState(false);
@@ -86,13 +87,6 @@ export default function RadarScreen() {
   useEffect(() => {
     loadAllPois();
   }, [loadAllPois]);
-
-  const rawSpeedKmh =
-    location?.coords.speed && location.coords.speed > 0 ? Math.round(location.coords.speed * 3.6) : 0;
-  // Same gate as the background task: raw GPS speed drifts a few km/h even
-  // parked and stationary — without this the speedometer shows a phantom
-  // reading like "11 km/h" while the car isn't moving.
-  const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
 
   const initialRegion: Region = {
     latitude: location?.coords.latitude ?? 30.0444,
@@ -463,7 +457,7 @@ export default function RadarScreen() {
       </View>
 
       <View style={styles.speedometer}>
-        <Text style={styles.speedValue}>{isScanning ? speedKmh : '--'}</Text>
+        <Text style={styles.speedValue}>{isScanning ? Math.round(speedKmh) : '--'}</Text>
         <Text style={styles.speedUnit}>{isAr ? 'كم/س' : 'km/h'}</Text>
       </View>
 
