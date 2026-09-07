@@ -292,7 +292,12 @@ export default function DiagnosticsScreen() {
 
       let errorMessage: string;
       const status = err instanceof GroqApiError ? err.status : undefined;
-      if (status === 401) {
+      const isDecommissioned = err instanceof GroqApiError && err.message.includes('decommissioned');
+      if (isDecommissioned) {
+        errorMessage = isAr
+          ? 'الموديل المستخدم توقف من Groq — لازم تحدّث اسم الموديل في الكود'
+          : 'The configured Groq model has been decommissioned — update the model name in code';
+      } else if (status === 401) {
         errorMessage = isAr
           ? 'مفتاح Groq API غير صالح أو مفقود — تحقق من ملف .env'
           : 'Invalid or missing Groq API key — check your .env file';

@@ -50,7 +50,7 @@ const GROQ_API_KEY = process.env.EXPO_PUBLIC_GROQ_API_KEY ?? '';
 // https://console.groq.com/docs/models for the current list.
 // llama-3.3-70b-versatile is a solid default: strong instruction-following
 // and good bilingual (EN/AR) output at no cost on the free tier.
-const GROQ_MODEL = process.env.EXPO_PUBLIC_GROQ_MODEL ?? 'llama-3.3-70b-versatile';
+const GROQ_MODEL = process.env.EXPO_PUBLIC_GROQ_MODEL ?? 'openai/gpt-oss-120b';
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 // How long we wait for a response before giving up and surfacing the
@@ -158,6 +158,15 @@ export async function fetchDTCFromAI(code: string, moduleName?: string): Promise
   if (!response.ok) {
     const errText = await response.text().catch(() => '');
     console.error(`[Groq] request failed — status ${response.status}:`, errText);
+    // Groq returns 400 with code "model_decommissioned" when the model name
+    // itself has been retired — a very different (and very common) failure
+    // mode from a bad key or a rate limit, worth its own explicit message.
+    if (response.status === 400 && errText.includes('model_decommissioned')) {
+      throw new GroqApiError(
+        `Groq model "${GROQ_MODEL}" has been decommissioned. Check https://console.groq.com/docs/models for a current model name.`,
+        response.status
+      );
+    }
     throw new GroqApiError(`Groq request failed (${response.status}): ${errText}`, response.status);
   }
 
