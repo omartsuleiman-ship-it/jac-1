@@ -566,6 +566,41 @@ export const getTransmissionDTCs = async (): Promise<{ code: string; module: str
   }
 };
 
+// Mode 04 — Clear DTCs / MIL. Locked with the same isSequenceActive flag as
+// every other multi-command sequence here, so a fast-poll tick (RPM, OBD
+// speed) can never interleave a PID request in the middle of this. Returns
+// true ONLY when the ECU's own reply confirms the clear — the caller
+// (diagnostics.tsx) must not clear its UI list unless this resolves true.
+export const clearDTCs = async (): Promise<boolean> => {
+  isSequenceActive = true;
+  try {
+    // Reset to the engine ECU header first, same as every other command in
+    // this file — Mode 04 itself has no PID/header targeting semantics, but
+    // this avoids any adapter-specific surprise from issuing 04 while the
+    // header happens to be pointed at a different ECU from a prior scan.
+    await sendOBDCommand('ATSH7E0', 500);
+    const response = await sendOBDCommand('04', 3000); // clearing can take longer than a normal PID read
+    const clean = response.replace(/[\s\r\n>]+/g, '').toUpperCase();
+
+    // Mode 04's positive response is "44" (0x04 + 0x40, no data bytes).
+    // Some ELM327 firmware also echoes a bare "OK" for this specific mode.
+    // NO DATA / ERROR / UNABLE / a negative response (starts with 7F), or an
+    // empty buffer all mean the ECU did NOT confirm the clear.
+    const looksPositive = clean.includes('44') || clean.includes('OK');
+    const looksFailed =
+      clean.includes('NODATA') || clean.includes('ERROR') || clean.includes('UNABLE') || clean.startsWith('7F') || clean.length === 0;
+    const success = looksPositive && !looksFailed;
+
+    console.log(`[BLE] Clear DTCs (Mode 04) raw response: "${response.trim()}" -> ${success ? 'CONFIRMED' : 'FAILED'}`);
+    return success;
+  } catch (error) {
+    console.warn('[BLE] Clear DTCs failed:', error);
+    return false;
+  } finally {
+    isSequenceActive = false;
+  }
+};
+
 export type LiveDataKey = 'rpm' | 'coolant' | 'voltage' | 'engineLoad' | 'maf' | 'o2' | 'fuelTrim';
 
 export const getLiveData = async (selectedKeys: LiveDataKey[]) => {

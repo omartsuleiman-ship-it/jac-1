@@ -20,8 +20,8 @@ import {
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { DTC_DATABASE, DTCRecord, URGENCY_META, UrgencyLevel } from '../constants/dtc_dictionary';
-import { getEngineDTCs, getLiveData, getMisfireCounters, getReadiness, getTransmissionDTCs, isConnected, LiveDataKey } from '../services/bleService';
-import { fetchDTCFromAI } from '../services/groqDtcService';
+import { clearDTCs, getEngineDTCs, getLiveData, getMisfireCounters, getReadiness, getTransmissionDTCs, isConnected, LiveDataKey } from '../services/bleService';
+import { fetchDTCFromAI, GroqApiError } from '../services/groqDtcService';
 import { useLang } from './_layout';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -162,6 +162,7 @@ type FaultItem = Partial<DTCRecord> & {
   code: string;
   source: 'LOCAL' | 'AI';
   status: FaultStatus;
+  errorMessage?: string; // set on 'error' status — 401/429-specific text when known, generic otherwise
 };
 
 type AdviceContent = {
@@ -192,6 +193,7 @@ export default function DiagnosticsScreen() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanTarget, setScanTarget] = useState<'engine' | 'transmission' | null>(null);
   const [faults, setFaults] = useState<FaultItem[] | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
   const scanIdRef = useRef(0);
 
   // --- LIVE DATA state (Engine) ---
@@ -285,9 +287,28 @@ export default function DiagnosticsScreen() {
         prev?.map((f) => (f.code === code ? { ...ai, source: 'AI', status: 'ready' } : f)) ?? prev
       );
     } catch (err) {
-      console.warn(`AI fallback failed for ${code}:`, err);
+      console.error(`AI fallback failed for ${code}:`, err);
       if (scanIdRef.current !== scanId) return;
-      setFaults((prev) => prev?.map((f) => (f.code === code ? { ...f, status: 'error' } : f)) ?? prev);
+
+      let errorMessage: string;
+      const status = err instanceof GroqApiError ? err.status : undefined;
+      if (status === 401) {
+        errorMessage = isAr
+          ? 'مفتاح Groq API غير صالح أو مفقود — تحقق من ملف .env'
+          : 'Invalid or missing Groq API key — check your .env file';
+      } else if (status === 429) {
+        errorMessage = isAr
+          ? 'تم تجاوز الحد المسموح من الطلبات (429) — حاول بعد قليل'
+          : 'Rate limit reached (429) — try again shortly';
+      } else {
+        errorMessage = isAr
+          ? 'تعذر الوصول للذكاء الاصطناعي لتفسير هذا الكود. تأكد من الاتصال بالإنترنت.'
+          : "Couldn't reach the AI to explain this code. Check your internet connection.";
+      }
+
+      setFaults((prev) =>
+        prev?.map((f) => (f.code === code ? { ...f, status: 'error', errorMessage } : f)) ?? prev
+      );
     }
   };
 
@@ -336,10 +357,57 @@ export default function DiagnosticsScreen() {
   };
 
   const handleClear = () => {
-    Alert.alert(isAr ? 'مسح الأعطال' : 'Clear Faults', isAr ? 'هل أنت متأكد؟' : 'Are you sure?', [
-      { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
-      { text: isAr ? 'مسح' : 'Clear', style: 'destructive', onPress: () => setFaults([]) },
-    ]);
+    if (!isConnected()) {
+      Alert.alert(
+        isAr ? 'غير متصل' : 'Not Connected',
+        isAr ? 'من فضلك اتصل بجهاز الـ OBD أولاً' : 'Please connect to the OBD dongle first'
+      );
+      return;
+    }
+
+    Alert.alert(
+      isAr ? 'مسح الأعطال' : 'Clear Faults',
+      isAr
+        ? 'تأكد إن المحرك متوقف (OFF) والمفتاح في وضع التشغيل (ON) قبل مسح الأعطال.'
+        : 'Please ensure the engine is OFF, but the ignition is in the ON position before clearing codes.',
+      [
+        { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
+        {
+          text: isAr ? 'مسح' : 'Clear',
+          style: 'destructive',
+          onPress: async () => {
+            // The UI list is NOT touched until the ECU actually confirms the
+            // clear (Mode 04 — a "44"/OK reply). Clearing it optimistically
+            // here is exactly what caused the "fake clear" bug: the
+            // check-engine light stayed on because nothing was ever really
+            // sent to the car.
+            setIsClearing(true);
+            try {
+              const success = await clearDTCs();
+              if (success) {
+                setFaults([]);
+                AsyncStorage.setItem('@stored_faults', JSON.stringify([])).catch(() => {});
+              } else {
+                Alert.alert(
+                  isAr ? 'فشل المسح' : 'Clear Failed',
+                  isAr
+                    ? 'لم يستجب الكمبيوتر بنجاح. الأعطال ما زالت مسجلة.'
+                    : "The ECU didn't confirm the clear. The faults are still stored."
+                );
+              }
+            } catch (error) {
+              console.error('Clear DTCs failed:', error);
+              Alert.alert(
+                isAr ? 'خطأ' : 'Error',
+                isAr ? 'تعذر الاتصال بالكمبيوتر لمسح الأعطال' : 'Could not reach the ECU to clear codes'
+              );
+            } finally {
+              setIsClearing(false);
+            }
+          },
+        },
+      ]
+    );
   };
 
   // ---------------------------------------------------------------------------
@@ -591,8 +659,10 @@ export default function DiagnosticsScreen() {
                   )}
                 </View>
                 {faultCount > 0 && (
-                  <TouchableOpacity onPress={handleClear} hitSlop={8}>
-                    <Text style={styles.clearLink}>{isAr ? 'مسح الكل' : 'Clear all'}</Text>
+                  <TouchableOpacity onPress={handleClear} hitSlop={8} disabled={isClearing}>
+                    <Text style={[styles.clearLink, isClearing && { opacity: 0.4 }]}>
+                      {isClearing ? (isAr ? 'جارٍ المسح...' : 'Clearing...') : isAr ? 'مسح الكل' : 'Clear all'}
+                    </Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -1061,9 +1131,10 @@ function FaultCard({
           </View>
         </View>
         <Text style={[styles.faultDescription, { textAlign: isAr ? 'right' : 'left', color: COLORS.textSecondary }]}>
-          {isAr
-            ? 'تعذر الوصول للذكاء الاصطناعي لتفسير هذا الكود. تأكد من الاتصال بالإنترنت.'
-            : "Couldn't reach the AI to explain this code. Check your internet connection."}
+          {fault.errorMessage ||
+            (isAr
+              ? 'تعذر الوصول للذكاء الاصطناعي لتفسير هذا الكود. تأكد من الاتصال بالإنترنت.'
+              : "Couldn't reach the AI to explain this code. Check your internet connection.")}
         </Text>
         <TouchableOpacity style={styles.retryBtn} onPress={onRetry} activeOpacity={0.85}>
           <View style={[styles.smartAdviceRow, { flexDirection: dir }]}>

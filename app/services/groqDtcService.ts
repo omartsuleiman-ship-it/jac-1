@@ -103,6 +103,19 @@ export interface AIResolvedDTC extends DTCRecord {
   source: 'AI';
 }
 
+// Thrown instead of a bare Error whenever Groq's HTTP response itself
+// carries a status code — lets callers (diagnostics.tsx) show a specific,
+// actionable message (invalid key vs. rate-limited) instead of one generic
+// "couldn't reach the AI" string for every failure mode.
+export class GroqApiError extends Error {
+  status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'GroqApiError';
+    this.status = status;
+  }
+}
+
 export async function fetchDTCFromAI(code: string, moduleName?: string): Promise<AIResolvedDTC> {
   if (!GROQ_API_KEY) {
     throw new Error('Missing EXPO_PUBLIC_GROQ_API_KEY — set it in your .env file.');
@@ -136,6 +149,7 @@ export async function fetchDTCFromAI(code: string, moduleName?: string): Promise
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`Groq request timed out after ${REQUEST_TIMEOUT_MS / 1000}s.`);
     }
+    console.error('[Groq] network-level fetch failure:', err);
     throw err;
   } finally {
     clearTimeout(timeoutId);
@@ -143,7 +157,8 @@ export async function fetchDTCFromAI(code: string, moduleName?: string): Promise
 
   if (!response.ok) {
     const errText = await response.text().catch(() => '');
-    throw new Error(`Groq request failed (${response.status}): ${errText}`);
+    console.error(`[Groq] request failed — status ${response.status}:`, errText);
+    throw new GroqApiError(`Groq request failed (${response.status}): ${errText}`, response.status);
   }
 
   const data = await response.json();
