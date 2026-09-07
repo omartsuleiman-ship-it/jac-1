@@ -18,7 +18,15 @@ import {
 const NEARBY_RADIUS_KM = 5; // slice rendered on the map
 const BOUNDING_BOX_KM = 2; // cheap pre-filter radius, run BEFORE any trig
 const ALERT_RADIUS_M = 700; // Haversine alert threshold — gives more braking distance
-const FORWARD_CONE_DEG = 45; // |heading - bearing| tolerance
+// FORWARD_CONE_DEG (bare angular cone) removed — replaced by the
+// along-track/cross-track corridor check further down. A 45° cone at 700m
+// tolerates ~495m of lateral spread (700·sin45°), wide enough to catch a
+// radar on a road merely crossing underneath (overpass) or nearby but
+// unrelated. The corridor check asks the geometrically correct question:
+// "how far sideways from my actual line of travel is this point", which
+// stays road-width-sized regardless of distance.
+const CLOSE_PASS_RADIUS_M = 60; // within this, you've physically driven beside the camera
+const PASSED_RADAR_COOLDOWN_MS = 180000; // 3 min — covers a typical ramp/slip-road curve-back
 // Bumped past the original 30-60s window on purpose: at 700m, a driver at
 // city speeds (~40 km/h) can take 60s+ to cross the whole zone before
 // reaching the camera. A 45s cooldown would let the exact loop you're
@@ -95,6 +103,41 @@ const updateIdleTracking = (speedKmh: number): boolean => {
 };
 
 export const isRadarIdle = () => radarIsIdle;
+
+// ── Close-Pass Ledger (Edge Case 1: "ghost" radar after a curve/slip road) ──
+// Geometry-based, NOT tied to whether an alert actually fired — a radar you
+// were under the speed limit for (Smart mode, no sound played) still needs
+// to be remembered as passed, otherwise a curve/ramp that swings your
+// heading back toward it slips through the corridor check and falsely
+// re-alerts. Module-level for the same headless-task reason as
+// stationarySinceMs/radarIsIdle above.
+const passedRadarLedger: Record<string, number> = {};
+
+const toRadLocal = (deg: number) => (deg * Math.PI) / 180;
+
+// ── Along-track / cross-track corridor (Edge Case 2: overpass / crossing
+// road) ── Decomposes the vector to a candidate radar into how far AHEAD
+// (along my heading) and how far SIDEWAYS (perpendicular to my heading) it
+// is. A point on my own road stays within a small, near-constant sideways
+// offset as I approach; a point on a different, merely nearby road (classic
+// case: a lower road crossing under an overpass) will generally sit well
+// outside that corridor except right at the crossing point itself.
+const projectAlongAndCrossTrack = (
+  distanceM: number,
+  headingDeg: number,
+  bearingDeg: number
+): { alongTrackM: number; crossTrackM: number } => {
+  const relative = toRadLocal(bearingDeg - headingDeg);
+  return {
+    alongTrackM: distanceM * Math.cos(relative),
+    crossTrackM: distanceM * Math.sin(relative),
+  };
+};
+
+// Corridor half-width in meters: a couple of lanes plus margin close in,
+// widening mildly with distance to absorb GPS heading noise, but capped
+// well short of what the old 45° cone allowed at range.
+const corridorHalfWidthM = (distanceM: number): number => Math.min(45, 20 + distanceM * 0.03);
 
 interface LastAlertMemory {
   id: string;
@@ -285,7 +328,24 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   for (const poi of candidates) {
     if (poi.type !== 'radar') continue; // bumps/comments are map-only, no TTS
     const distance = haversineMeters(latitude, longitude, poi.latitude, poi.longitude);
+
+    // Close-Pass Ledger: stamped for EVERY radar candidate regardless of
+    // distance/corridor/alert-radius, so it also catches cameras that would
+    // otherwise be excluded right at the moment you're beside one (relative
+    // bearing ~90° while actually passing it).
+    if (distance <= CLOSE_PASS_RADIUS_M) {
+      passedRadarLedger[poi.id] = Date.now();
+    }
+
     if (distance > ALERT_RADIUS_M) continue;
+
+    // Ghost-radar veto (Edge Case 1): recently driven past, still cooling
+    // down — skip outright no matter what the current heading/corridor
+    // says. This is what stops a slip-road curve or ramp from re-triggering
+    // a camera that's actually behind you on the main road, independent of
+    // whether an alert ever fired for it in the first place.
+    const passedAt = passedRadarLedger[poi.id];
+    if (passedAt !== undefined && Date.now() - passedAt < PASSED_RADAR_COOLDOWN_MS) continue;
 
     // Strict forward-only: if heading isn't reliable (device stationary or
     // a weak GPS course estimate — heading is -1/null then), do NOT alert.
@@ -293,7 +353,14 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
     // cameras on side roads or behind the car through.
     if (heading === null || heading === undefined || heading < 0) continue;
     const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
-    if (angularDiff(heading, bearing) > FORWARD_CONE_DEG) continue;
+
+    // Corridor check (Edge Case 2 — replaces the bare 45° cone): must be
+    // genuinely ahead along my heading AND within a road-width-sized
+    // sideways offset of my actual line of travel — not just anywhere
+    // inside a wide angular cone.
+    const { alongTrackM, crossTrackM } = projectAlongAndCrossTrack(distance, heading, bearing);
+    if (alongTrackM <= 0) continue; // behind me along my heading — never alert
+    if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) continue; // off to the side — different road
 
     // Twin-radar mute + U-turn bypass. Distance is measured POI-to-POI
     // (this candidate vs. the last alerted radar's own coordinates) — twin
