@@ -206,7 +206,7 @@ const GENERIC_RADAR_SOUND: Record<'ar' | 'en', any> = {
 // Runs once at module load — same timing guarantee as TaskManager.defineTask
 // below, so playback is configured before the first alert can possibly
 // fire, including on a cold headless-JS start with the screen off.
-Audio.setAudioModeAsync({
+const DUCKED_AUDIO_MODE = {
   staysActiveInBackground: true,
   playsInSilentModeIOS: true,
   // Duck (lower, not pause) whatever's already playing — Spotify, Apple
@@ -216,54 +216,106 @@ Audio.setAudioModeAsync({
   interruptionModeIOS: InterruptionModeIOS.DuckOthers,
   shouldDuckAndroid: true,
   interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-}).catch((err) => console.warn('[Radar] failed to configure audio mode:', err));
+} as const;
+
+// Symmetric with DUCKED_AUDIO_MODE on purpose — every field the duck mode
+// sets gets an explicit counterpart here, rather than omitting fields and
+// hoping expo-av defaults them back sanely.
+const RESTORED_AUDIO_MODE = {
+  staysActiveInBackground: true,
+  playsInSilentModeIOS: true,
+  interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
+  // No interruptionModeAndroid here on purpose: your installed expo-av
+  // types don't expose a MixWithOthers member for Android, and DoNotMix
+  // would be actively wrong (it seizes audio focus instead of releasing
+  // it). shouldDuckAndroid: false is what actually does the un-ducking on
+  // Android — the interruption-mode enum there only meaningfully
+  // distinguishes DoNotMix vs DuckOthers while something IS ducking.
+  shouldDuckAndroid: false,
+} as const;
+
+Audio.setAudioModeAsync(DUCKED_AUDIO_MODE).catch((err) =>
+  console.warn('[Radar] failed to configure audio mode:', err)
+);
 
 let currentSound: Audio.Sound | null = null;
+// Monotonically increasing token identifying whichever alert most recently
+// claimed the duck. This is what makes restoration correct regardless of
+// HOW an alert's playback ends (natural finish, interrupted by a newer
+// alert, explicit stop, unmount, or createAsync throwing) — the old design
+// only restored from inside one specific sound's own didJustFinish
+// callback, so any path that ended playback a different way left the
+// session permanently ducked with nothing left to ever undo it.
+let duckGeneration = 0;
+
+// Idempotent and safe to call from any exit path, any number of times. Only
+// actually restores when nothing newer has since claimed the duck — an
+// older, now-abandoned sound's eventual "I finished" callback becomes a
+// no-op instead of racing a newer alert's in-progress duck.
+const restoreAudioMode = async (forGeneration: number) => {
+  if (forGeneration !== duckGeneration) return; // a newer alert now owns the eventual restore
+  try {
+    await Audio.setAudioModeAsync(RESTORED_AUDIO_MODE);
+  } catch (err) {
+    console.warn('[Radar] failed to restore audio mode:', err);
+  }
+};
+
+// Unloads whatever's currently playing, if anything, WITHOUT restoring —
+// for callers about to immediately duck again for a new sound.
+const unloadCurrentSound = async () => {
+  const sound = currentSound;
+  currentSound = null;
+  if (sound) await sound.unloadAsync().catch(() => {});
+};
+
+// The one function every "this feature is stopping" path (explicit Stop
+// Scan, screen unmount) must call. Stops whatever's audible right now AND
+// guarantees the session actually gets un-ducked, even mid-alert.
+export const stopAndRestoreCurrentSound = async () => {
+  duckGeneration += 1; // invalidate any in-flight restore still tied to the sound we're about to kill
+  await unloadCurrentSound();
+  await restoreAudioMode(duckGeneration);
+};
 
 const playRadarSound = async (poi: RadarPoi, isAr: boolean) => {
   const lang: 'ar' | 'en' = isAr ? 'ar' : 'en';
   const asset = (poi.maxspeed !== null && RADAR_SOUNDS[lang][poi.maxspeed]) || GENERIC_RADAR_SOUND[lang];
 
-  try {
-    // Only one clip should ever be audible at a time.
-    if (currentSound) {
-      await currentSound.unloadAsync().catch(() => {});
-      currentSound = null;
-    }
+  const myGeneration = ++duckGeneration; // this alert now owns the eventual restore
 
-    // Re-assert DuckOthers right before every play — a PREVIOUS alert may
-    // have already reset the session to MixWithOthers on finish (see the
-    // status listener below), so DuckOthers can't be assumed still active.
+  try {
+    // Only one clip should ever be audible at a time. No restore here on
+    // purpose — myGeneration is about to duck again immediately below.
+    await unloadCurrentSound();
+
+    // Re-assert DuckOthers on every play — a previous alert may have already
+    // restored the session on finish, so DuckOthers can't be assumed active.
     // staysActiveInBackground + playsInSilentModeIOS stay on continuously —
     // this is what lets iOS mix the clip into an active phone call route
     // (or play with the ringer switched to silent), same as Google Maps nav.
-    await Audio.setAudioModeAsync({
-      staysActiveInBackground: true,
-      playsInSilentModeIOS: true,
-      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-      shouldDuckAndroid: true,
-      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-    });
+    await Audio.setAudioModeAsync(DUCKED_AUDIO_MODE);
 
     const { sound } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
     currentSound = sound;
+
     sound.setOnPlaybackStatusUpdate((status) => {
-      if (status.isLoaded && status.didJustFinish) {
-        // Explicitly stop ducking — without this, whatever got ducked
-        // (Spotify, Apple Music, podcasts, a call) stays lowered
-        // indefinitely instead of restoring once the clip ends.
-        Audio.setAudioModeAsync({
-          staysActiveInBackground: true,
-          playsInSilentModeIOS: true,
-          interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-          shouldDuckAndroid: false,
-        }).catch((err) => console.warn('[Radar] failed to reset audio mode after alert:', err));
+      if (!status.isLoaded) {
+        if (status.error) console.warn('[Radar] alert sound playback error:', status.error);
+        return;
+      }
+      if (status.didJustFinish) {
         sound.unloadAsync().catch(() => {});
         if (currentSound === sound) currentSound = null;
+        restoreAudioMode(myGeneration);
       }
     });
   } catch (err) {
     console.warn('[Radar] failed to play alert sound:', err);
+    // Playback never actually started — this generation has nothing left to
+    // finish and fire didJustFinish, so restore immediately instead of
+    // leaving the session ducked against a sound that will never complete.
+    restoreAudioMode(myGeneration);
   }
 };
 
@@ -599,6 +651,7 @@ function useRadarEngine() {
     return () => {
       cancelled = true;
       stopRadarBackgroundTracking().catch(() => {});
+      stopAndRestoreCurrentSound().catch(() => {});
     };
   }, [isScanning]);
 
@@ -609,6 +662,7 @@ function useRadarEngine() {
   // الـ cleanup.
   const stopScanning = useCallback(async () => {
     setIsScanning(false);
+    await stopAndRestoreCurrentSound(); // guarantees ducking recovers even if Stop is pressed mid-alert
     try {
       const stillRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (stillRunning) {
