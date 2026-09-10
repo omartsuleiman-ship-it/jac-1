@@ -513,20 +513,23 @@ function useRadarEngine() {
     (async () => {
       await refreshPois(); // populate allPoisRef first so the filter below has something to filter
 
-      // Instant-load path: use whatever fix the OS already has cached (or a
-      // quick low-accuracy fix) so the map centers and markers render right
-      // away, instead of waiting 20-30s for the first BestForNavigation fix
-      // from startLocationUpdatesAsync below. If permission isn't granted
-      // yet, both calls just throw — caught and ignored; the normal
-      // high-accuracy watcher will populate location once it's granted.
+      // Instant-centering path: read ONLY the OS's already-cached fix
+      // (getLastKnownPositionAsync) — this never activates the GPS radio,
+      // so it costs nothing in battery and, just as importantly, never
+      // lights up the location indicator before the user has pressed Start
+      // Scan. The getCurrentPositionAsync() fallback that used to be here
+      // was removed on purpose: it actively requests a fresh fix from
+      // hardware, which is exactly what was firing GPS on every app open
+      // regardless of isScanning. If there's no cached fix yet (fresh
+      // install, simulator, GPS radio never used before), the map simply
+      // stays on its default fallback region until scanning starts — that
+      // trade-off is correct now that zero unsolicited GPS activity is the
+      // actual requirement, not "center the map as fast as possible."
       try {
-        let quick = await Location.getLastKnownPositionAsync({
+        const quick = await Location.getLastKnownPositionAsync({
           maxAge: 5 * 60 * 1000,
           requiredAccuracy: 5000,
         });
-        if (!quick) {
-          quick = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Low });
-        }
         if (cancelled || !quick) return;
         setLocation(quick);
         lastLocationRef.current = { latitude: quick.coords.latitude, longitude: quick.coords.longitude };
