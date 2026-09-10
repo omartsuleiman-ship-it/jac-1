@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -31,16 +32,25 @@ import { COLORS, useLang } from './_layout';
 const PIN_COLORS: Record<RadarPoiType, string> = {
   radar: '#FF3B30',
   bump: '#FFB020',
+  police: '#1E3A8A',
+  roadwork: '#F59E0B',
+  traffic: '#6B7280',
+  accident: '#EC4899',
   comment: '#5AC8FA',
 };
 
-// أيقونات حقيقية بدل الدبوس الافتراضي — نفس الأيقونات المستخدمة في قائمة
-// "إضافة نقطة" أصلاً، عشان الماركر على الماب والاختيار في القائمة يفضلوا
-// متطابقين بصريًا.
-const POI_ICONS: Record<RadarPoiType, keyof typeof Ionicons.glyphMap> = {
-  radar: 'camera',
-  bump: 'alert-circle',
-  comment: 'chatbubble',
+// صور PNG حقيقية بدل أيقونات Ionicons المولّدة — نفس الصور مستخدمة في
+// الماركر على الخريطة وفي خيارات قائمة "إضافة نقطة"، عشان يفضلوا متطابقين
+// بصريًا. require() بيتحل وقت الـ build، فلازم الملفات دي موجودة فعليًا
+// في app/assets/icons/ قبل أي build.
+const POI_ICON_IMAGES: Record<RadarPoiType, any> = {
+  radar: require('../assets/icons/radar.png'),
+  bump: require('../assets/icons/bump.png'),
+  police: require('../assets/icons/police.png'),
+  roadwork: require('../assets/icons/roadwork.png'),
+  traffic: require('../assets/icons/traffic.png'),
+  accident: require('../assets/icons/accident.png'),
+  comment: require('../assets/icons/comment.png'),
 };
 
 export default function RadarScreen() {
@@ -380,6 +390,10 @@ export default function RadarScreen() {
           : `Speed camera${poi.maxspeed ? ` — ${poi.maxspeed} km/h` : ''}`;
       }
       if (poi.type === 'bump') return isAr ? 'مطب صناعي' : 'Speed bump';
+      if (poi.type === 'police') return isAr ? 'نقطة شرطة' : 'Police checkpoint';
+      if (poi.type === 'roadwork') return isAr ? 'أعمال طريق' : 'Roadwork';
+      if (poi.type === 'traffic') return isAr ? 'زحمة مرور' : 'Traffic jam';
+      if (poi.type === 'accident') return isAr ? 'حادث' : 'Accident';
       return poi.note || (isAr ? 'ملاحظة' : 'Comment');
     },
     [isAr]
@@ -407,9 +421,7 @@ export default function RadarScreen() {
           anchor={{ x: 0.5, y: 0.5 }}
           tracksViewChanges={false}
         >
-          <View style={[styles.poiMarkerBadge, { backgroundColor: PIN_COLORS[poi.type] }]}>
-            <Ionicons name={POI_ICONS[poi.type]} size={16} color="#FFFFFF" />
-          </View>
+          <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
         </Marker>
       )),
     [displayedPois, poiLabel, handleDeletePoi]
@@ -528,7 +540,7 @@ export default function RadarScreen() {
               style={[styles.modalOption, { borderColor: PIN_COLORS.radar }]}
               onPress={() => handleAddPoi('radar')}
             >
-              <Ionicons name="camera" size={20} color={PIN_COLORS.radar} />
+              <Image source={POI_ICON_IMAGES.radar} style={styles.modalOptionIcon} resizeMode="contain" />
               <Text style={styles.modalOptionText}>{isAr ? 'رادار' : 'Radar'}</Text>
             </Pressable>
 
@@ -536,15 +548,47 @@ export default function RadarScreen() {
               style={[styles.modalOption, { borderColor: PIN_COLORS.bump }]}
               onPress={() => handleAddPoi('bump')}
             >
-              <Ionicons name="alert-circle" size={20} color={PIN_COLORS.bump} />
+              <Image source={POI_ICON_IMAGES.bump} style={styles.modalOptionIcon} resizeMode="contain" />
               <Text style={styles.modalOptionText}>{isAr ? 'مطب صناعي' : 'Speed Bump'}</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalOption, { borderColor: PIN_COLORS.police }]}
+              onPress={() => handleAddPoi('police')}
+            >
+              <Image source={POI_ICON_IMAGES.police} style={styles.modalOptionIcon} resizeMode="contain" />
+              <Text style={styles.modalOptionText}>{isAr ? 'نقطة شرطة' : 'Police'}</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalOption, { borderColor: PIN_COLORS.roadwork }]}
+              onPress={() => handleAddPoi('roadwork')}
+            >
+              <Image source={POI_ICON_IMAGES.roadwork} style={styles.modalOptionIcon} resizeMode="contain" />
+              <Text style={styles.modalOptionText}>{isAr ? 'أعمال طريق' : 'Roadwork'}</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalOption, { borderColor: PIN_COLORS.traffic }]}
+              onPress={() => handleAddPoi('traffic')}
+            >
+              <Image source={POI_ICON_IMAGES.traffic} style={styles.modalOptionIcon} resizeMode="contain" />
+              <Text style={styles.modalOptionText}>{isAr ? 'زحمة مرور' : 'Traffic Jam'}</Text>
+            </Pressable>
+
+            <Pressable
+              style={[styles.modalOption, { borderColor: PIN_COLORS.accident }]}
+              onPress={() => handleAddPoi('accident')}
+            >
+              <Image source={POI_ICON_IMAGES.accident} style={styles.modalOptionIcon} resizeMode="contain" />
+              <Text style={styles.modalOptionText}>{isAr ? 'حادث' : 'Accident'}</Text>
             </Pressable>
 
             <Pressable
               style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]}
               onPress={handleOpenCommentInput}
             >
-              <Ionicons name="chatbubble" size={20} color={PIN_COLORS.comment} />
+              <Image source={POI_ICON_IMAGES.comment} style={styles.modalOptionIcon} resizeMode="contain" />
               <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
             </Pressable>
 
@@ -583,6 +627,8 @@ export default function RadarScreen() {
             />
             <Pressable style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]} onPress={handleSaveComment}>
               <Ionicons name="checkmark" size={20} color={PIN_COLORS.comment} />
+              {/* أيقونة "تم/checkmark" فضلت Ionicons عمدًا هنا — دي فعل حفظ عام،
+                  مش تصنيف نوع نقطة، فمفيش صورة PNG مخصصة ليها أصلًا */}
               <Text style={styles.modalOptionText}>{isAr ? 'حفظ' : 'Save'}</Text>
             </Pressable>
             <Pressable
@@ -751,6 +797,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   modalOptionText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', marginLeft: 10 },
+  modalOptionIcon: { width: 22, height: 22 },
+  poiMarkerImage: { width: 32, height: 32 },
   modalCancel: { alignItems: 'center', paddingVertical: 10, marginTop: 4 },
   modalCancelText: { color: COLORS.inactive, fontSize: 13 },
   commentInput: {

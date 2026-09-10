@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // pulled from Overpass — see the export.geojson sample you shared.
 import RadarGeoJSON from '../assets/data/RadarDB.json';
 
-export type RadarPoiType = 'radar' | 'bump' | 'comment';
+export type RadarPoiType = 'radar' | 'bump' | 'police' | 'roadwork' | 'traffic' | 'accident' | 'comment';
 export type RadarPoiSource = 'osm' | 'user';
 
 export interface RadarPoi {

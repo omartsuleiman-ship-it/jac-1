@@ -231,8 +231,8 @@ export default function TripCostScreen() {
  // ── Delete Trip Handler ──
   const handleDeleteTrip = (id: string) => {
     Alert.alert(
-      isAr ? 'مسح الرحلة' : 'Delete Trip',
-      isAr ? 'هل أنت متأكد من مسح هذه الرحلة من السجل؟' : 'Are you sure you want to delete this trip?',
+      isAr ? 'مسح السجل' : 'Delete Entry',
+      isAr ? 'هل أنت متأكد من مسح هذا السجل من القائمة؟' : 'Are you sure you want to delete this entry?',
       [
         { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
         {
@@ -259,7 +259,7 @@ export default function TripCostScreen() {
             <View style={[styles.cardHeaderRow, { flexDirection: dir }]}>
               <Ionicons name="speedometer-outline" size={18} color={COLORS.accent} />
               <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
-                {isAr ? 'إجمالي الرحلة المباشرة' : 'Live Trip Totals'}
+                {isAr ? 'إجمالي الاستهلاك الحالي' : 'Current Consumption'}
               </Text>
               <View style={[styles.statusDot, { backgroundColor: tripActive ? COLORS.accent : COLORS.textSecondary }]} />
             </View>
@@ -306,13 +306,13 @@ export default function TripCostScreen() {
             <TouchableOpacity style={[styles.actionButton, styles.startButton, tripActive && styles.disabledButton, { flexDirection: dir }]} onPress={handleStartTrip} disabled={tripActive}>
               <Ionicons name="play" size={18} color={tripActive ? COLORS.textSecondary : '#0B0D10'} />
               <Text style={[styles.actionButtonText, { color: tripActive ? COLORS.textSecondary : '#0B0D10' }]}>
-                {isAr ? 'بدء الرحلة' : 'Start Trip'}
+                {isAr ? 'بدء التتبع' : 'Start Tracking'}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.actionButton, styles.endButton, !tripActive && styles.disabledButton, { flexDirection: dir }]} onPress={handleEndTrip} disabled={!tripActive}>
               <Ionicons name="stop" size={18} color={!tripActive ? COLORS.textSecondary : '#FFFFFF'} />
               <Text style={[styles.actionButtonText, { color: !tripActive ? COLORS.textSecondary : '#FFFFFF' }]}>
-                {isAr ? 'إنهاء الرحلة' : 'End Trip'}
+                {isAr ? 'إنهاء التتبع' : 'Stop Tracking'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -321,7 +321,7 @@ export default function TripCostScreen() {
           {recentTrips.length > 0 && (
             <View style={[styles.card, { marginTop: 16 }]}>
               <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
-                {isAr ? 'سجل الرحلات (آخر 10)' : 'Trip History (Last 10)'}
+                {isAr ? 'سجل التتبع (آخر 10)' : 'Tracking History (Last 10)'}
               </Text>
               {recentTrips.slice(0, showAllTrips ? 10 : 3).map((trip) => (
                 <View key={trip.id} style={{ borderBottomWidth: 1, borderBottomColor: COLORS.cardBorder, paddingVertical: 12 }}>
