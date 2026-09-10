@@ -34,6 +34,15 @@ const PIN_COLORS: Record<RadarPoiType, string> = {
   comment: '#5AC8FA',
 };
 
+// أيقونات حقيقية بدل الدبوس الافتراضي — نفس الأيقونات المستخدمة في قائمة
+// "إضافة نقطة" أصلاً، عشان الماركر على الماب والاختيار في القائمة يفضلوا
+// متطابقين بصريًا.
+const POI_ICONS: Record<RadarPoiType, keyof typeof Ionicons.glyphMap> = {
+  radar: 'camera',
+  bump: 'alert-circle',
+  comment: 'chatbubble',
+};
+
 export default function RadarScreen() {
   const { isAr } = useLang();
   const {
@@ -393,10 +402,15 @@ export default function RadarScreen() {
         <Marker
           key={poi.id}
           coordinate={{ latitude: poi.latitude, longitude: poi.longitude }}
-          pinColor={PIN_COLORS[poi.type]}
           title={poiLabel(poi)}
           onCalloutPress={() => handleDeletePoi(poi)}
-        />
+          anchor={{ x: 0.5, y: 0.5 }}
+          tracksViewChanges={false}
+        >
+          <View style={[styles.poiMarkerBadge, { backgroundColor: PIN_COLORS[poi.type] }]}>
+            <Ionicons name={POI_ICONS[poi.type]} size={16} color="#FFFFFF" />
+          </View>
+        </Marker>
       )),
     [displayedPois, poiLabel, handleDeletePoi]
   );
@@ -844,5 +858,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: 'center',
     marginBottom: 8,
+  },
+  poiMarkerBadge: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
   },
 });

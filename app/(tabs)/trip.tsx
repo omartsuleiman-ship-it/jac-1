@@ -1,9 +1,7 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Location from 'expo-location';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Keyboard,
   KeyboardAvoidingView,
@@ -16,7 +14,7 @@ import {
   TextInput,
   TouchableOpacity,
   TouchableWithoutFeedback,
-  View,
+  View
 } from 'react-native';
 import { isConnected, sendOBDCommand } from '../services/bleService';
 import { useLang } from './_layout';
@@ -36,11 +34,6 @@ const COLORS = {
   startPin: '#00E676',
 };
 
-type Coords = { latitude: number; longitude: number };
-type Suggestion = { display_name: string; lat: string; lon: string };
-
-
-const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
 
 // ── Eco Score: compares this trip's fuel consumption (L/100km) against a
@@ -59,44 +52,12 @@ const calculateEcoScore = (distanceKm: number, fuelLiters: number): number | nul
   return Math.max(0, Math.min(100, Math.round(raw)));
 };
 
-// ── OSRM Route Fetcher (Modified to return distance) ──
-async function fetchOsrmRoute(from: Coords, to: Coords): Promise<{coords: Coords[], distanceKm: number}> {
-  const url = `${OSRM_BASE_URL}/${from.longitude},${from.latitude};${to.longitude},${to.latitude}?overview=full&geometries=geojson`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`OSRM request failed with status ${response.status}`);
-  
-  const json = await response.json();
-  if (json.code !== 'Ok' || !json.routes?.length) {
-    throw new Error('OSRM could not find a route between these points');
-  }
-  const distanceKm = json.routes[0].distance / 1000; // Distance in km
-  const geoCoords: [number, number][] = json.routes[0].geometry.coordinates;
-  const coords = geoCoords.map(([longitude, latitude]) => ({ latitude, longitude }));
-  return { coords, distanceKm };
-}
-
 export default function TripCostScreen() {
   const { isAr } = useLang();
   const dir = isAr ? 'row-reverse' : 'row';
 
-  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // ── Trip State ──
   const [tripActive, setTripActive] = useState(false);
-  const [currentLocation, setCurrentLocation] = useState<Coords | null>(null);
-  
-  // ── Map State ──
-  const [fromText, setFromText] = useState('');
-  const [toText, setToText] = useState('');
-  const [fromCoords, setFromCoords] = useState<Coords | null>(null);
-  const [toCoords, setToCoords] = useState<Coords | null>(null);
-  const [routeCoords, setRouteCoords] = useState<Coords[]>([]);
-  const [routeDistanceKm, setRouteDistanceKm] = useState<number | null>(null);
-  
-  const [isRouting, setIsRouting] = useState(false);
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
-  const [activeField, setActiveField] = useState<'from' | 'to' | null>(null);
-  const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
 
   // ── Live OBD Data State ──
   const [distanceKm, setDistanceKm] = useState(0);
@@ -132,24 +93,6 @@ export default function TripCostScreen() {
     };
     loadState();
   }, []);
-
-  useEffect(() => {
-    let subscription: Location.LocationSubscription | null = null;
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
-      
-      const initial = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const initialCoords = { latitude: initial.coords.latitude, longitude: initial.coords.longitude };
-      setCurrentLocation(initialCoords);
-      
-      subscription = await Location.watchPositionAsync(
-        { accuracy: Location.Accuracy.High, timeInterval: 3000, distanceInterval: 10 },
-        (loc) => setCurrentLocation({ latitude: loc.coords.latitude, longitude: loc.coords.longitude })
-      );
-    })();
-    return () => { subscription?.remove(); };
-  }, [isAr]);
 
   // ── OBD Polling ──
   const lastPollRef = useRef<number | null>(null);
@@ -275,76 +218,6 @@ export default function TripCostScreen() {
     }
   };
 
-  // ── Routing Logic ──
-  const onSearchTextChange = (text: string, field: 'from' | 'to') => {
-    if (field === 'from') setFromText(text);
-    else setToText(text);
-
-    setActiveField(field);
-    if (typingTimer.current) clearTimeout(typingTimer.current);
-
-    if (text.length > 2) {
-      setIsFetchingSuggestions(true);
-      typingTimer.current = setTimeout(async () => {
-        try {
-          const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(text)}&format=json&limit=4&countrycodes=eg`);
-          const data = await res.json();
-          setSuggestions(data);
-        } catch (e) {
-          console.error(e);
-        } finally {
-          setIsFetchingSuggestions(false);
-        }
-      }, 800);
-    } else {
-      setSuggestions([]);
-      setIsFetchingSuggestions(false);
-    }
-  };
-
-  const selectSuggestion = (item: Suggestion) => {
-    const coords = { latitude: parseFloat(item.lat), longitude: parseFloat(item.lon) };
-    if (activeField === 'from') {
-      setFromText(item.display_name.split(',')[0]); 
-      setFromCoords(coords);
-    } else {
-      setToText(item.display_name.split(',')[0]);
-      setToCoords(coords);
-    }
-    setSuggestions([]);
-    setActiveField(null);
-  };
-
-  const handleSearchRoute = async () => {
-    const startNode = fromCoords || currentLocation;
-    if (!startNode || !toCoords) {
-      Alert.alert(isAr ? 'بيانات ناقصة' : 'Missing Info', isAr ? 'برجاء تحديد نقطة البداية والنهاية.' : 'Please set both start and destination points.');
-      return;
-    }
-    setIsRouting(true);
-    try {
-      const { coords, distanceKm } = await fetchOsrmRoute(startNode, toCoords);
-      setRouteCoords(coords);
-      setRouteDistanceKm(distanceKm);
-    } catch (err: any) {
-      Alert.alert(isAr ? 'خطأ في المسار' : 'Route Error', err.message ?? 'Could not fetch route.');
-      setRouteCoords([]);
-      setRouteDistanceKm(null);
-    } finally {
-      setIsRouting(false);
-    }
-  };
-
-  const clearRoute = () => {
-    setFromText('');
-    setToText('');
-    setFromCoords(null);
-    setToCoords(null);
-    setRouteCoords([]);
-    setRouteDistanceKm(null);
-    setSuggestions([]);
-  };
-
   // ── Calculations ──
   const fuelPriceNum = parseFloat(fuelPrice) || 0;
   const extraCostsNum = parseFloat(extraCosts) || 0;
@@ -381,81 +254,6 @@ export default function TripCostScreen() {
         
         <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
           
-          {/* ── ROUTING CARD ── */}
-          <View style={styles.card}>
-            <Text style={[styles.cardHeader, { textAlign: isAr ? 'right' : 'left' }]}>
-              {isAr ? 'تخطيط المسار' : 'Plan Route'}
-            </Text>
-            
-            <TextInput
-              style={[styles.input, { textAlign: isAr ? 'right' : 'left' }]}
-              placeholder={isAr ? 'من (اتركه فارغاً لاستخدام الـ GPS)' : 'From (Leave blank for GPS)'}
-              placeholderTextColor={COLORS.textSecondary}
-              value={fromText}
-              onChangeText={(t) => onSearchTextChange(t, 'from')}
-            />
-            {activeField === 'from' && suggestions.length > 0 && (
-              <View style={styles.suggestionsContainer}>
-                {suggestions.map((item, index) => (
-                  <TouchableOpacity key={index} style={[styles.suggestionItem, { flexDirection: dir }]} onPress={() => selectSuggestion(item)}>
-                    <Ionicons name="location-outline" size={16} color={COLORS.textSecondary} />
-                    <Text style={[styles.suggestionText, { textAlign: isAr ? 'right' : 'left' }]} numberOfLines={2}>{item.display_name}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-
-            <TextInput
-              style={[styles.input, { marginTop: 10, textAlign: isAr ? 'right' : 'left' }]}
-              placeholder={isAr ? 'إلى (ابحث أو اضغط على الخريطة)' : 'To (Search or Tap on map)'}
-              placeholderTextColor={COLORS.textSecondary}
-              value={toText}
-              onChangeText={(t) => onSearchTextChange(t, 'to')}
-            />
-            {activeField === 'to' && suggestions.length > 0 && (
-              <View style={styles.suggestionsContainer}>
-                {suggestions.map((item, index) => (
-                  <TouchableOpacity key={index} style={[styles.suggestionItem, { flexDirection: dir }]} onPress={() => selectSuggestion(item)}>
-                    <Ionicons name="location-outline" size={16} color={COLORS.textSecondary} />
-                    <Text style={[styles.suggestionText, { textAlign: isAr ? 'right' : 'left' }]} numberOfLines={2}>{item.display_name}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-
-            {isFetchingSuggestions && (
-               <Text style={[styles.fetchingText, { textAlign: isAr ? 'right' : 'left' }]}>{isAr ? 'جاري البحث...' : 'Searching...'}</Text>
-            )}
-
-            <View style={[styles.routeActionRow, { flexDirection: dir }]}>
-              <TouchableOpacity style={[styles.searchRouteButton, { flexDirection: dir }]} onPress={handleSearchRoute} disabled={isRouting}>
-                {isRouting ? (
-                  <ActivityIndicator size="small" color="#0B0D10" />
-                ) : (
-                  <>
-                    <Ionicons name="git-network-outline" size={16} color="#0B0D10" />
-                    <Text style={styles.searchRouteButtonText}>{isAr ? 'رسم المسار' : 'Draw Route'}</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-              {(fromCoords || toCoords) && (
-                <TouchableOpacity style={styles.clearRouteButton} onPress={clearRoute}>
-                  <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
-                </TouchableOpacity>
-              )}
-            </View>
-
-            {/* ── Theoretical Distance Pill ── */}
-            {routeDistanceKm !== null && (
-              <View style={[styles.distancePill, { flexDirection: dir }]}>
-                <Ionicons name="map-outline" size={18} color={COLORS.accent} />
-                <Text style={styles.distancePillText}>
-                  {isAr ? `المسافة النظرية للمسار: ${routeDistanceKm.toFixed(1)} كم` : `Estimated Route Distance: ${routeDistanceKm.toFixed(1)} km`}
-                </Text>
-              </View>
-            )}
-          </View>
-
           {/* ── LIVE DATA CARD ── */}
           <View style={styles.card}>
             <View style={[styles.cardHeaderRow, { flexDirection: dir }]}>
@@ -609,8 +407,6 @@ export default function TripCostScreen() {
                 const newTrip = {
                   id: Date.now().toString(),
                   date: new Date().toLocaleDateString('en-GB'),
-                  from: fromText || (isAr ? 'غير محدد' : 'Blank'),
-                  to: toText || (isAr ? 'غير محدد' : 'Blank'),
                   cost: totalCost.toFixed(2),
                   distanceKm,
                   ecoScore: calculateEcoScore(distanceKm, fuelConsumedLiters),

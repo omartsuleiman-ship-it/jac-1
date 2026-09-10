@@ -121,7 +121,7 @@ export default function TabLayout() {
           <Tabs.Screen
             name="trip"
             options={{
-              title: isAr ? 'الرحلات' : 'Trip & Cost',
+              title: isAr ? 'تكلفة الوقود' : 'Fuel Cost',
               tabBarIcon: ({ color, size, focused }) => (
                 <IconWrapper focused={focused}>
                   <Ionicons name={focused ? 'calculator' : 'calculator-outline'} size={size} color={color} />
