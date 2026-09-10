@@ -17,7 +17,7 @@ import {
   View,
 } from 'react-native';
 import MapView, { Camera, Marker } from 'react-native-maps';
-import { useRadar } from '../hooks/useRadarWatchdog';
+import { LOCATION_TIME_INTERVAL_MS, useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
   RadarPoiType,
@@ -52,7 +52,44 @@ const POI_ICON_IMAGES: Record<RadarPoiType, any> = {
   accident: require('../assets/icons/accident.png'),
   comment: require('../assets/icons/comment.png'),
 };
+// Meters to project the camera's center ahead of the driver, along their
+// heading, so the real GPS fix lands in the lower third of the screen
+// instead of dead-center. Tuned for the fixed zoom:15/pitch:50 nav camera
+// below — re-tune both together if you change either.
+const NAV_FORWARD_OFFSET_M = 70;
+// Where the fixed "you are here" arrow sits on screen (0 = top, 1 = bottom)
+// while nav mode is active. Must stay visually matched to the offset above.
+const NAV_ARROW_SCREEN_FRACTION = 0.72;
 
+// Standard spherical "destination point given start, bearing, distance"
+// formula — used only for camera framing, never for alert geometry.
+function destinationPoint(
+  lat: number,
+  lng: number,
+  bearingDeg: number,
+  distanceM: number
+): { latitude: number; longitude: number } {
+  const R = 6371000;
+  const delta = distanceM / R;
+  const theta = (bearingDeg * Math.PI) / 180;
+  const phi1 = (lat * Math.PI) / 180;
+  const lambda1 = (lng * Math.PI) / 180;
+
+  const phi2 = Math.asin(
+    Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta)
+  );
+  const lambda2 =
+    lambda1 +
+    Math.atan2(
+      Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
+      Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2)
+    );
+
+  return {
+    latitude: (phi2 * 180) / Math.PI,
+    longitude: (((lambda2 * 180) / Math.PI + 540) % 360) - 180,
+  };
+}
 export default function RadarScreen() {
   const { isAr } = useLang();
   const {
@@ -153,11 +190,23 @@ export default function RadarScreen() {
       // every fix, matching standard turn-by-turn nav behavior.
       const heading = location.coords.heading; // GPS course/trajectory, NOT magnetic compass
       const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
-      mapRef.current.animateCamera({
-        center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-        heading: hasReliableHeading ? heading : 0,
-        pitch: hasReliableHeading ? 50 : 0,
-      });
+      // Offset the geographic center forward so the driver's true coordinate
+      // sits in the lower third of the screen (see the fixed arrow overlay
+      // in the JSX below, which shares NAV_ARROW_SCREEN_FRACTION).
+      const center = hasReliableHeading
+        ? destinationPoint(location.coords.latitude, location.coords.longitude, heading, NAV_FORWARD_OFFSET_M)
+        : { latitude: location.coords.latitude, longitude: location.coords.longitude };
+      // duration MUST match the fix cadence. Leaving it unset lets the
+      // native animation finish early and idle until the next fix — that
+      // stop/start gap is the stutter. Matching it keeps motion continuous.
+      mapRef.current.animateCamera(
+        {
+          center,
+          heading: hasReliableHeading ? heading : 0,
+          pitch: hasReliableHeading ? 50 : 0,
+        },
+        { duration: LOCATION_TIME_INTERVAL_MS }
+      );
       return;
     }
 
@@ -371,8 +420,11 @@ export default function RadarScreen() {
     const heading = location.coords.heading;
     const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
     const useCourseUp = isScanning && hasReliableHeading;
+    const center = useCourseUp
+      ? destinationPoint(location.coords.latitude, location.coords.longitude, heading, NAV_FORWARD_OFFSET_M)
+      : { latitude: location.coords.latitude, longitude: location.coords.longitude };
     mapRef.current.animateCamera({
-      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+      center,
       heading: useCourseUp ? heading : 0,
       pitch: useCourseUp ? 50 : 0,
     });
@@ -440,7 +492,12 @@ export default function RadarScreen() {
         onLongPress={handleLongPress}
       >
         {markers}
-        {location && (
+        {/* Only rendered OUTSIDE nav mode. In nav mode the camera itself
+            tracks the driver every fix, so a lat/lng Marker here would be
+            reprojected over the JS bridge independently of the native
+            camera animation — that mismatch is what caused the diagonal
+            "off-road" drift. See the fixed overlay below for nav mode. */}
+        {location && !isScanning && (
           <Marker
             coordinate={{ latitude: location.coords.latitude, longitude: location.coords.longitude }}
             anchor={{ x: 0.5, y: 0.5 }}
@@ -452,6 +509,20 @@ export default function RadarScreen() {
           </Marker>
         )}
       </MapView>
+
+      {/* Course-up nav arrow: a screen-space overlay, NOT a map Marker. The
+          camera is the single source of truth for both position (re-centered
+          on the driver every fix) and rotation (bearing == heading), so this
+          icon never moves or rotates itself — it just always points up, at a
+          fixed screen spot. That removes the Marker/camera desync entirely. */}
+      {isScanning && (
+        <View
+          pointerEvents="none"
+          style={[styles.navArrowContainer, { top: `${NAV_ARROW_SCREEN_FRACTION * 100}%` }]}
+        >
+          <Ionicons name="navigate" size={34} color="#00D9C6" />
+        </View>
+      )}
 
       <Pressable style={styles.recenterButton} onPress={handleRecenter}>
         <Ionicons name="locate" size={22} color="#FFFFFF" />
@@ -732,7 +803,15 @@ export default function RadarScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.background },
+ container: { flex: 1, backgroundColor: COLORS.background },
+  navArrowContainer: {
+    position: 'absolute',
+    left: '50%',
+    marginLeft: -17, // half of icon size (34), to horizontally center it
+    marginTop: -17,  // half of icon size, to vertically center on `top`
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   topOverlay: {
     position: 'absolute',
     top: 50,

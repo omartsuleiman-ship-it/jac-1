@@ -33,7 +33,7 @@ const PASSED_RADAR_COOLDOWN_MS = 180000; // 3 min — covers a typical ramp/slip
 // trying to prevent happen mid-zone. 90s comfortably covers that crossing
 // time at any speed you'd realistically be driving when this fires.
 const ALERT_DEBOUNCE_MS = 90000;
-const LOCATION_TIME_INTERVAL_MS = 1000; // 1s — was 3000, this was the visible speedometer lag
+export const LOCATION_TIME_INTERVAL_MS = 1000; // 1s — was 3000, this was the visible speedometer lag
 const LOCATION_DISTANCE_INTERVAL_M = 1; // 1m — was 15, too coarse for real-time speed
 // Below this, GPS speed is treated as noise (multipath reflections, drift)
 // rather than real motion — without it, a parked car could show ~10+ km/h,
@@ -348,8 +348,10 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const { latitude, longitude, heading } = loc.coords;
   // السرعة مصدرها OBD2 حصريًا (obdSpeedStore)، مش هذا الـ GPS fix — سرعة الـ
   // GPS متأخرة 1-5 ثواني عن الحقيقة، وده مرفوض لتنبيه رادار.
-  const rawSpeedKmh = getObdSpeedKmh();
-  const speedKmh = rawSpeedKmh < SPEED_NOISE_GATE_KMH ? 0 : rawSpeedKmh;
+ // OBD2 (PID 01 0D) is a real ECU/wheel-speed reading, not a noisy GPS
+  // estimate — no floor needed. Feed it straight through so low-speed
+  // (1-4 km/h) alerting is accurate instead of silently zeroed.
+  const speedKmh = getObdSpeedKmh();
 
   // Smart Idle: once parked for 40+ consecutive seconds, skip the heavy
   // proximity math below entirely (bounding box + Haversine + bearing per
@@ -554,11 +556,13 @@ function useRadarEngine() {
   // نبضات الـ GPS، فالسبيدوميتر وحساب الـ idle بيستجيبوا بسرعة الـ OBD نفسها،
   // مش لما يجي أقرب GPS fix بالصدفة.
   useEffect(() => {
-    const unsubscribe = subscribeObdSpeed((rawKmh) => {
-      const gatedKmh = rawKmh < SPEED_NOISE_GATE_KMH ? 0 : rawKmh;
-      setSpeedKmh(gatedKmh);
+   const unsubscribe = subscribeObdSpeed((kmh) => {
+      // No noise gate: OBD2 speed is exact, so 1-4 km/h should display as
+      // 1-4 km/h. IDLE_SPEED_THRESHOLD_KMH below is a separate, deliberate
+      // battery-saving cutoff — not a data-quality filter — so it's untouched.
+      setSpeedKmh(kmh);
 
-      const idleNow = updateIdleTracking(gatedKmh);
+      const idleNow = updateIdleTracking(kmh);
       if (idleNow !== isIdleRef.current) {
         isIdleRef.current = idleNow;
         setIsIdle(idleNow);
