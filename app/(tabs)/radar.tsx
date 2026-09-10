@@ -15,7 +15,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import MapView, { Marker, Region } from 'react-native-maps';
+import MapView, { Camera, Marker } from 'react-native-maps';
 import { useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
@@ -57,7 +57,11 @@ export default function RadarScreen() {
   const mapRef = useRef<MapView>(null);
   // 'standard' (vector tiles) uses far less GPU/battery than satellite
   // imagery — default to it and let the user opt into satellite explicitly.
-  const [mapType, setMapType] = useState<'standard' | 'satellite'>('standard');
+  // 'hybrid', not 'satellite': plain 'satellite' is raw imagery with ZERO
+  // road names, city labels, or POIs overlaid — that's what was rendering
+  // as an empty satellite view. 'hybrid' is imagery WITH the label overlay
+  // on top, same as what Google/Apple Maps call "Satellite" in their own UI.
+  const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
 
   const [allPois, setAllPois] = useState<RadarPoi[]>([]);
   // لما ده يبقى فيه قيمة، الماب بتعرض ردارات منطقة معينة (بحث أو نقطة
@@ -88,38 +92,64 @@ export default function RadarScreen() {
     loadAllPois();
   }, [loadAllPois]);
 
-  const initialRegion: Region = {
-    latitude: location?.coords.latitude ?? 30.0444,
-    longitude: location?.coords.longitude ?? 31.2357,
-    latitudeDelta: 0.05,
-    longitudeDelta: 0.05,
+  // initialCamera, not initialRegion — the entire point of this fix is to
+  // stop mixing react-native-maps' region-based API with its camera-based
+  // API on the same MapView. On iOS, any region-based call (including just
+  // the initialRegion prop) can implicitly reset the native camera's
+  // heading/pitch back to 0, silently fighting animateCamera() elsewhere.
+  // Zoom has no exact equivalent to the old 0.05° lat/lng delta — 15 is a
+  // reasonable street-level default; adjust to taste.
+  const initialCamera: Camera = {
+    center: {
+      latitude: location?.coords.latitude ?? 30.0444,
+      longitude: location?.coords.longitude ?? 31.2357,
+    },
+    heading: 0,
+    pitch: 0,
+    zoom: 15,
   };
 
   // Corrects the Cairo fallback the moment the first real fix lands, then
   // gets out of the way — must never fight the user's own panning/zooming
   // on subsequent fixes, hence the one-time ref instead of a dependency.
   const hasCenteredOnFirstFixRef = useRef(false);
+
+  // Single source of truth for ALL camera movement, on purpose. iOS's
+  // native camera bridge has a well-documented quirk: a PARTIAL
+  // animateCamera() call (e.g. center only, omitting heading/pitch) can
+  // silently reset the omitted fields back to 0/north instead of leaving
+  // them untouched. This file used to have three separate call sites each
+  // animating only SOME camera fields (a center-only "first fix" effect, a
+  // center+heading+pitch "course-up" effect, and a recenter button that
+  // sometimes omitted heading entirely) — those raced each other, which is
+  // very likely why the compass value updated correctly while the rendered
+  // map still looked north-up/diagonal. Now there's exactly one effect, and
+  // every animateCamera() call in this file (including the recenter
+  // button, below) always specifies center, heading, AND pitch together.
   useEffect(() => {
-    if (!location || hasCenteredOnFirstFixRef.current || !mapRef.current) return;
+    if (!location || !mapRef.current) return;
+
+    if (isScanning) {
+      // Continuous course-up nav mode: recenter AND rotate together on
+      // every fix, matching standard turn-by-turn nav behavior.
+      const heading = location.coords.heading; // GPS course/trajectory, NOT magnetic compass
+      const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
+      mapRef.current.animateCamera({
+        center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
+        heading: hasReliableHeading ? heading : 0,
+        pitch: hasReliableHeading ? 50 : 0,
+      });
+      return;
+    }
+
+    // Not scanning: only ever center ONCE, on the first real fix — must
+    // never fight the user's own panning/zooming afterward.
+    if (hasCenteredOnFirstFixRef.current) return;
     hasCenteredOnFirstFixRef.current = true;
     mapRef.current.animateCamera({
       center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-    });
-  }, [location]);
-
-  // True Course-Up (nav-style) rotation: only while actively scanning, so
-  // the map doesn't spin on its own when the feature isn't running. Also
-  // re-centers on every fix — heading alone (without moving the center to
-  // match) is what made the road look tilted/off-vertical as the car moved
-  // between fixes without the viewport recentering under it.
-  useEffect(() => {
-    if (!isScanning || !location || !mapRef.current) return;
-    const heading = location.coords.heading; // GPS course/trajectory, NOT magnetic compass
-    if (heading === null || heading === undefined || heading < 0) return; // unreliable course — don't rotate on noise
-    mapRef.current.animateCamera({
-      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-      heading,
-      pitch: 50,
+      heading: 0,
+      pitch: 0,
     });
   }, [location, isScanning]);
 
@@ -314,16 +344,23 @@ export default function RadarScreen() {
   const handleRecenter = useCallback(() => {
     setCustomView(null); // ارجع لعرض الردارات القريبة من موقعك الحقيقي
     if (!location || !mapRef.current) return;
+    // Always send the full camera object together — a partial call (e.g.
+    // omitting heading) is the exact iOS quirk that could silently reset
+    // course-up rotation elsewhere. Mirror whatever the effect above would
+    // currently show, rather than forcing north-up, so tapping recenter
+    // mid-drive doesn't un-rotate the map out from under the driver.
+    const heading = location.coords.heading;
+    const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
+    const useCourseUp = isScanning && hasReliableHeading;
     mapRef.current.animateCamera({
       center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-      // heading is -1 when the device has no reliable course (stationary /
-      // weak fix) — animateCamera would otherwise snap to north unexpectedly.
-      heading: location.coords.heading != null && location.coords.heading >= 0 ? location.coords.heading : undefined,
+      heading: useCourseUp ? heading : 0,
+      pitch: useCourseUp ? 50 : 0,
     });
-  }, [location]);
+  }, [location, isScanning]);
 
   const toggleMapType = useCallback(() => {
-    setMapType((prev) => (prev === 'standard' ? 'satellite' : 'standard'));
+    setMapType((prev) => (prev === 'standard' ? 'hybrid' : 'standard'));
   }, []);
 
   const poiLabel = useCallback(
@@ -369,7 +406,7 @@ export default function RadarScreen() {
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
-        initialRegion={initialRegion}
+        initialCamera={initialCamera}
         mapType={mapType}
         showsUserLocation={false}
         showsMyLocationButton

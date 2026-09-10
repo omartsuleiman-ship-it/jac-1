@@ -17,10 +17,10 @@ import {
 // ── Tunables ──
 const NEARBY_RADIUS_KM = 5; // slice rendered on the map
 const BOUNDING_BOX_KM = 2; // cheap pre-filter radius, run BEFORE any trig
-const ALERT_RADIUS_M = 700; // Haversine alert threshold — gives more braking distance
+const ALERT_RADIUS_M = 500; // Haversine alert threshold
 // FORWARD_CONE_DEG (bare angular cone) removed — replaced by the
-// along-track/cross-track corridor check further down. A 45° cone at 700m
-// tolerates ~495m of lateral spread (700·sin45°), wide enough to catch a
+// along-track/cross-track corridor check further down. A 45° cone at 500m
+// tolerates ~354m of lateral spread (500·sin45°), wide enough to catch a
 // radar on a road merely crossing underneath (overpass) or nearby but
 // unrelated. The corridor check asks the geometrically correct question:
 // "how far sideways from my actual line of travel is this point", which
