@@ -46,6 +46,41 @@ const MAINTENANCE_ITEM_META: Record<string, { labelEn: string; labelAr: string; 
   battery: { labelEn: 'Battery', labelAr: 'البطارية', unit: 'months' },
 };
 
+// ── Reverse geocode via Nominatim (OpenStreetMap), not expo-location's
+// reverseGeocodeAsync — Nominatim actually honors an explicit
+// Accept-Language request. The native geocoder follows the DEVICE's OS
+// locale regardless of this app's own AR/EN toggle, which would silently
+// mismatch the two (label in one language, rest of the screen in another). ──
+const reverseGeocodeParkedLocation = async (
+  latitude: number,
+  longitude: number,
+  isAr: boolean
+): Promise<string | null> => {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&zoom=17`;
+    const response = await fetch(url, {
+      headers: {
+        // Nominatim's usage policy requires a distinguishing User-Agent.
+        'User-Agent': 'jac-car-app/1.0',
+        'Accept-Language': isAr ? 'ar' : 'en',
+      },
+    });
+    const data = await response.json();
+    const addr = data?.address || {};
+    const separator = isAr ? '، ' : ', ';
+    const parts = [
+      addr.road,
+      addr.suburb || addr.neighbourhood || addr.quarter,
+      addr.city_district || addr.city,
+    ].filter(Boolean);
+    if (parts.length > 0) return parts.slice(0, 2).join(separator);
+    return typeof data?.display_name === 'string' ? data.display_name.split(',').slice(0, 2).join(separator) : null;
+  } catch (error) {
+    console.warn('[Home] reverse geocode failed:', error);
+    return null;
+  }
+};
+
 export default function HomeScreen() {
   const { isAr, toggleLanguage } = useLang();
   const [greeting, setGreeting] = useState('');
@@ -65,6 +100,10 @@ export default function HomeScreen() {
     percentRemaining: number;
     overdue: boolean;
   } | null>(null);
+  // null يعني حالتين مختلفتين نميزهم في العرض: "لسه بيتحمّل" أو "مفيش موقع
+  // محفوظ خالص" — الاتنين بيوريوا نفس نص الـ fallback، وده مقصود، الفرق مش
+  // مهم بصريًا لحاجة صغيرة زي كارت الداشبورد ده.
+  const [parkedLocationLabel, setParkedLocationLabel] = useState<string | null>(null);
 
   useEffect(() => {
     const currentHour = new Date().getHours();
@@ -172,7 +211,25 @@ export default function HomeScreen() {
     } catch (error) {
       console.warn('Failed to load next service:', error);
     }
-  }, []);
+
+    // Last Parked label — كان نص ثابت (hardcoded) قبل كده، مش متجدد خالص.
+    // بيتعمل reverse geocode جديد كل مرة الشاشة دي تاخد focus، فلو اتسجل
+    // موقع ركنة جديد (أو المستخدم بدّل اللغة)، النص هنا هيتحدث صح.
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_KEY_LAST_PARKED);
+      if (!stored) {
+        setParkedLocationLabel(null); // مفيش موقع محفوظ خالص لسه
+      } else {
+        const parked = JSON.parse(stored) as { latitude: number; longitude: number; timestamp: number };
+        const label = await reverseGeocodeParkedLocation(parked.latitude, parked.longitude, isAr);
+        // الإحداثيات محفوظة وصحيحة أكيد — لو بس فشل تحويلها لاسم، نعرض نص
+        // عام بدل ما نسيب النص القديم (المحتمل يكون بلغة تانية) عالق.
+        setParkedLocationLabel(label || (isAr ? 'موقع محفوظ' : 'Saved location'));
+      }
+    } catch (error) {
+      console.warn('Failed to load parked location label:', error);
+    }
+  }, [isAr]);
 
   useFocusEffect(
     useCallback(() => {
@@ -345,7 +402,7 @@ export default function HomeScreen() {
                     <Ionicons name="pin-outline" size={22} color={COLORS.danger} style={{ marginBottom: 6 }} />
                     <Text style={styles.widgetTitle}>{isAr ? 'آخر ركنة' : 'Last Parked'}</Text>
                     <Text style={[styles.widgetValue, { fontSize: 13, marginTop: 4 }]} numberOfLines={1}>
-                      {isAr ? 'مجاورة 46' : 'Mogawra 46'}
+                      {parkedLocationLabel || (isAr ? 'لسه ما اتسجلش موقع' : 'No location saved')}
                     </Text>
                   </TouchableOpacity>
                 </View>
