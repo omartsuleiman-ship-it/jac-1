@@ -1,5 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-
+// @ts-ignore
+import MapLibreGL from '@maplibre/maplibre-react-native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -15,8 +16,7 @@ import {
   TextInput,
   View
 } from 'react-native';
-import MapView, { Camera, Marker } from 'react-native-maps';
-import { LOCATION_TIME_INTERVAL_MS, useRadar } from '../hooks/useRadarWatchdog';
+import { useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
   RadarPoiType,
@@ -27,6 +27,8 @@ import {
   saveUserPoi
 } from '../services/radarService';
 import { COLORS, useLang } from './_layout';
+
+MapLibreGL.setAccessToken(null);
 
 const PIN_COLORS: Record<RadarPoiType, string> = {
   radar: '#FF3B30',
@@ -51,44 +53,6 @@ const POI_ICON_IMAGES: Record<RadarPoiType, any> = {
   accident: require('../assets/icons/accident.png'),
   comment: require('../assets/icons/comment.png'),
 };
-// Meters to project the camera's center ahead of the driver, along their
-// heading, so the real GPS fix lands in the lower third of the screen
-// instead of dead-center. Tuned for the fixed zoom:15/pitch:50 nav camera
-// below — re-tune both together if you change either.
-const NAV_FORWARD_OFFSET_M = 70;
-// Where the fixed "you are here" arrow sits on screen (0 = top, 1 = bottom)
-// while nav mode is active. Must stay visually matched to the offset above.
-const NAV_ARROW_SCREEN_FRACTION = 0.72;
-
-// Standard spherical "destination point given start, bearing, distance"
-// formula — used only for camera framing, never for alert geometry.
-function destinationPoint(
-  lat: number,
-  lng: number,
-  bearingDeg: number,
-  distanceM: number
-): { latitude: number; longitude: number } {
-  const R = 6371000;
-  const delta = distanceM / R;
-  const theta = (bearingDeg * Math.PI) / 180;
-  const phi1 = (lat * Math.PI) / 180;
-  const lambda1 = (lng * Math.PI) / 180;
-
-  const phi2 = Math.asin(
-    Math.sin(phi1) * Math.cos(delta) + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta)
-  );
-  const lambda2 =
-    lambda1 +
-    Math.atan2(
-      Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
-      Math.cos(delta) - Math.sin(phi1) * Math.sin(phi2)
-    );
-
-  return {
-    latitude: (phi2 * 180) / Math.PI,
-    longitude: (((lambda2 * 180) / Math.PI + 540) % 360) - 180,
-  };
-}
 export default function RadarScreen() {
   const { isAr } = useLang();
   const {
@@ -108,7 +72,8 @@ export default function RadarScreen() {
   const [commentModalVisible, setCommentModalVisible] = useState(false);
   const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<MapLibreGL.MapView>(null);
+  const cameraRef = useRef<MapLibreGL.Camera>(null);
   // 'standard' (vector tiles) uses far less GPU/battery than satellite
   // imagery — default to it and let the user opt into satellite explicitly.
   // 'hybrid', not 'satellite': plain 'satellite' is raw imagery with ZERO
@@ -147,92 +112,14 @@ export default function RadarScreen() {
     loadAllPois();
   }, [loadAllPois]);
 
-  // initialCamera, not initialRegion — the entire point of this fix is to
-  // stop mixing react-native-maps' region-based API with its camera-based
-  // API on the same MapView. On iOS, any region-based call (including just
-  // the initialRegion prop) can implicitly reset the native camera's
-  // heading/pitch back to 0, silently fighting animateCamera() elsewhere.
-  // Zoom has no exact equivalent to the old 0.05° lat/lng delta — 15 is a
-  // reasonable street-level default; adjust to taste.
-  const initialCamera: Camera = {
-    center: {
-      latitude: location?.coords.latitude ?? 30.0444,
-      longitude: location?.coords.longitude ?? 31.2357,
-    },
-    heading: 0,
-    pitch: 0,
-    zoom: 15,
-  };
-
-  // Corrects the Cairo fallback the moment the first real fix lands, then
-  // gets out of the way — must never fight the user's own panning/zooming
-  // on subsequent fixes, hence the one-time ref instead of a dependency.
-  const hasCenteredOnFirstFixRef = useRef(false);
-
-  // THE ZOOM BUG: every animateCamera() call in this file only ever
-  // specified center/heading/pitch and left `zoom` out entirely.
-  // react-native-maps treats an omitted `zoom` as "set it to 0" — the
-  // whole-Earth view — not "leave it alone". So every single GPS fix (each
-  // course-up recenter, every LOCATION_TIME_INTERVAL_MS while scanning) was
-  // silently resetting the camera to zoom 0, then immediately fighting any
-  // pinch-to-zoom the user did in between fixes. This ref always holds the
-  // last known real zoom level (seeded from initialCamera.zoom, kept in
-  // sync by onCameraChange on the MapView below) so every animateCamera()
-  // call can explicitly re-assert it instead of letting it be reset.
-  const lastZoomRef = useRef(initialCamera.zoom ?? 15);
-
-  // Single source of truth for ALL camera movement, on purpose. iOS's
-  // native camera bridge has a well-documented quirk: a PARTIAL
-  // animateCamera() call (e.g. center only, omitting heading/pitch) can
-  // silently reset the omitted fields back to 0/north instead of leaving
-  // them untouched. This file used to have three separate call sites each
-  // animating only SOME camera fields (a center-only "first fix" effect, a
-  // center+heading+pitch "course-up" effect, and a recenter button that
-  // sometimes omitted heading entirely) — those raced each other, which is
-  // very likely why the compass value updated correctly while the rendered
-  // map still looked north-up/diagonal. Now there's exactly one effect, and
-  // every animateCamera() call in this file (including the recenter
-  // button, below) always specifies center, heading, AND pitch together.
-  useEffect(() => {
-    if (!location || !mapRef.current) return;
-
-    if (isScanning) {
-      // Continuous course-up nav mode: recenter AND rotate together on
-      // every fix, matching standard turn-by-turn nav behavior.
-      const heading = location.coords.heading; // GPS course/trajectory, NOT magnetic compass
-      const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
-      // Offset the geographic center forward so the driver's true coordinate
-      // sits in the lower third of the screen (see the fixed arrow overlay
-      // in the JSX below, which shares NAV_ARROW_SCREEN_FRACTION).
-      const center = hasReliableHeading
-        ? destinationPoint(location.coords.latitude, location.coords.longitude, heading, NAV_FORWARD_OFFSET_M)
-        : { latitude: location.coords.latitude, longitude: location.coords.longitude };
-      // duration MUST match the fix cadence. Leaving it unset lets the
-      // native animation finish early and idle until the next fix — that
-      // stop/start gap is the stutter. Matching it keeps motion continuous.
-      mapRef.current.animateCamera(
-        {
-          center,
-          heading: hasReliableHeading ? heading : 0,
-          pitch: hasReliableHeading ? 50 : 0,
-          zoom: lastZoomRef.current,
-        },
-        { duration: LOCATION_TIME_INTERVAL_MS }
-      );
-      return;
-    }
-
-    // Not scanning: only ever center ONCE, on the first real fix — must
-    // never fight the user's own panning/zooming afterward.
-    if (hasCenteredOnFirstFixRef.current) return;
-    hasCenteredOnFirstFixRef.current = true;
-    mapRef.current.animateCamera({
-      center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
-      heading: 0,
-      pitch: 0,
-      zoom: lastZoomRef.current,
-    });
-  }, [location, isScanning]);
+  // <Camera followUserLocation followUserMode={FollowWithHeading}> in the
+  // JSX below now owns positioning, rotation, AND zoom natively — no more
+  // manual animateCamera effect, no destinationPoint math, no zoom-tracking
+  // ref. Only a plain fallback center needed for before the first fix.
+  const DEFAULT_CENTER: [number, number] = [
+    location?.coords.longitude ?? 31.2357,
+    location?.coords.latitude ?? 30.0444,
+  ];
 
   // Button-triggered now, not long-press: reports are always added at the
   // user's OWN current position — same convention as Waze/Google Maps'
@@ -369,9 +256,10 @@ export default function RadarScreen() {
         radiusKm: SEARCH_RADIUS_KM,
         label: result.label,
       });
-      mapRef.current?.animateCamera({
-        center: { latitude: result.latitude, longitude: result.longitude },
-        zoom: lastZoomRef.current,
+      cameraRef.current?.setCamera({
+        centerCoordinate: [result.longitude, result.latitude],
+        zoomLevel: 15,
+        animationDuration: 500,
       });
       setSearchModalVisible(false);
       setSearchText('');
@@ -394,9 +282,9 @@ export default function RadarScreen() {
   }, []);
 
   const handleMapPress = useCallback(
-    (e: any) => {
+    (feature: any) => {
       if (!pinPickMode) return;
-      const { latitude, longitude } = e.nativeEvent.coordinate;
+      const [longitude, latitude] = feature.geometry.coordinates;
       handleSelectSearchResult({ latitude, longitude, label: isAr ? 'موقع مخصص' : 'Pinned location' });
     },
     [pinPickMode, handleSelectSearchResult, isAr]
@@ -404,25 +292,16 @@ export default function RadarScreen() {
 
   const handleRecenter = useCallback(() => {
     setCustomView(null); // ارجع لعرض الردارات القريبة من موقعك الحقيقي
-    if (!location || !mapRef.current) return;
-    // Always send the full camera object together — a partial call (e.g.
-    // omitting heading) is the exact iOS quirk that could silently reset
-    // course-up rotation elsewhere. Mirror whatever the effect above would
-    // currently show, rather than forcing north-up, so tapping recenter
-    // mid-drive doesn't un-rotate the map out from under the driver.
-    const heading = location.coords.heading;
-    const hasReliableHeading = heading !== null && heading !== undefined && heading >= 0;
-    const useCourseUp = isScanning && hasReliableHeading;
-    const center = useCourseUp
-      ? destinationPoint(location.coords.latitude, location.coords.longitude, heading, NAV_FORWARD_OFFSET_M)
-      : { latitude: location.coords.latitude, longitude: location.coords.longitude };
-    mapRef.current.animateCamera({
-      center,
-      heading: useCourseUp ? heading : 0,
-      pitch: useCourseUp ? 50 : 0,
-      zoom: lastZoomRef.current,
+    if (!location) return;
+    // No manual heading math needed — <Camera followUserLocation
+    // followUserMode={FollowWithHeading}> below already keeps the map
+    // course-up continuously. This just snaps back to it if the user panned away.
+    cameraRef.current?.setCamera({
+      centerCoordinate: [location.coords.longitude, location.coords.latitude],
+      zoomLevel: 15,
+      animationDuration: 500,
     });
-  }, [location, isScanning]);
+  }, [location]);
 
   const toggleMapType = useCallback(() => {
     setMapType((prev) => (prev === 'standard' ? 'hybrid' : 'standard'));
@@ -459,79 +338,40 @@ export default function RadarScreen() {
   const markers = useMemo(
     () =>
       displayedPois.map((poi) => (
-        <Marker
+        <MapLibreGL.PointAnnotation
           key={poi.id}
-          coordinate={{ latitude: poi.latitude, longitude: poi.longitude }}
+          id={poi.id}
+          coordinate={[poi.longitude, poi.latitude]}
           title={poiLabel(poi)}
-          onCalloutPress={() => handleDeletePoi(poi)}
-          anchor={{ x: 0.5, y: 0.5 }}
-          tracksViewChanges={false}
+          onSelected={() => handleDeletePoi(poi)}
         >
           <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
-        </Marker>
+        </MapLibreGL.PointAnnotation>
       )),
     [displayedPois, poiLabel, handleDeletePoi]
   );
 
   return (
     <View style={styles.container}>
-      <MapView
+      <MapLibreGL.MapView
         ref={mapRef}
-        style={StyleSheet.absoluteFillObject}
-        initialCamera={initialCamera}
-        mapType={mapType}
-        showsUserLocation={false}
-        showsMyLocationButton
-        showsCompass
+        style={{ flex: 1 }}
+        styleURL="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
         onPress={handleMapPress}
-        onRegionChangeComplete={(region: any) => {
-          // Same purpose as onCameraChange — not present in this
-          // react-native-maps version's type definitions, so we use the
-          // older, universally-supported region event instead. This is
-          // what stops the fight with manual pinch-to-zoom: without it, a
-          // user pinch updates the native camera, but the NEXT
-          // animateCamera() call (next GPS fix) would still re-assert a
-          // stale zoom instead of what the user just pinched to. Standard
-          // region-delta → zoom conversion: zoom 0 spans the full 360°
-          // world, so zoom = log2(360 / longitudeDelta).
-          if (region?.longitudeDelta) {
-            const zoom = Math.log2(360 / region.longitudeDelta);
-            if (Number.isFinite(zoom)) lastZoomRef.current = zoom;
-          }
-        }}
       >
-        {markers}
-        {/* Only rendered OUTSIDE nav mode. In nav mode the camera itself
-            tracks the driver every fix, so a lat/lng Marker here would be
-            reprojected over the JS bridge independently of the native
-            camera animation — that mismatch is what caused the diagonal
-            "off-road" drift. See the fixed overlay below for nav mode. */}
-        {location && !isScanning && (
-          <Marker
-            coordinate={{ latitude: location.coords.latitude, longitude: location.coords.longitude }}
-            anchor={{ x: 0.5, y: 0.5 }}
-            flat
-            rotation={location.coords.heading != null && location.coords.heading >= 0 ? location.coords.heading : 0}
-            tracksViewChanges={false}
-          >
-            <Ionicons name="navigate" size={30} color="#00D9C6" />
-          </Marker>
-        )}
-      </MapView>
+        <MapLibreGL.Camera
+          ref={cameraRef}
+          defaultSettings={{ centerCoordinate: DEFAULT_CENTER, zoomLevel: 15 }}
+          followUserLocation={isScanning}
+          followUserMode={MapLibreGL.UserTrackingModes.FollowWithHeading}
+          followZoomLevel={16}
+          followPitch={50}
+        />
 
-      {/* Course-up nav arrow: a screen-space overlay, NOT a map Marker. The
-          camera is the single source of truth for both position (re-centered
-          on the driver every fix) and rotation (bearing == heading), so this
-          icon never moves or rotates itself — it just always points up, at a
-          fixed screen spot. That removes the Marker/camera desync entirely. */}
-      {isScanning && (
-        <View
-          pointerEvents="none"
-          style={[styles.navArrowContainer, { top: `${NAV_ARROW_SCREEN_FRACTION * 100}%` }]}
-        >
-          <Ionicons name="navigate" size={34} color="#00D9C6" />
-        </View>
-      )}
+        <MapLibreGL.UserLocation visible showsUserHeadingIndicator />
+
+        {markers}
+      </MapLibreGL.MapView>
 
       <Pressable style={styles.recenterButton} onPress={handleRecenter}>
         <Ionicons name="locate" size={22} color="#FFFFFF" />
