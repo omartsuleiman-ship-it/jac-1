@@ -238,6 +238,14 @@ Audio.setAudioModeAsync(DUCKED_AUDIO_MODE).catch((err) =>
   console.warn('[Radar] failed to configure audio mode:', err)
 );
 
+// Real clip length when expo-av reports it (it reliably does for these
+// bundled local assets), capped as a hard ceiling in case an asset comes
+// back with a null/zero duration. This is what the fix below blocks on —
+// NOT the didJustFinish event, which requires a JS bridge message to be
+// delivered AFTER playback ends and cannot be trusted to arrive before the
+// OS suspends the process while the app is backgrounded.
+const MAX_ALERT_CLIP_MS = 6000;
+
 let currentSound: Audio.Sound | null = null;
 // Monotonically increasing token identifying whichever alert most recently
 // claimed the duck. This is what makes restoration correct regardless of
@@ -296,26 +304,52 @@ const playRadarSound = async (poi: RadarPoi, isAr: boolean) => {
     // (or play with the ringer switched to silent), same as Google Maps nav.
     await Audio.setAudioModeAsync(DUCKED_AUDIO_MODE);
 
-    const { sound } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
+    const { sound, status } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
     currentSound = sound;
 
-    sound.setOnPlaybackStatusUpdate((status) => {
-      if (!status.isLoaded) {
-        if (status.error) console.warn('[Radar] alert sound playback error:', status.error);
+    // Kept as a fast-path for the FOREGROUND case (or any background
+    // invocation lucky enough to still be awake when it fires): if this
+    // fires, it's a no-op the moment the sleep below also tries to restore,
+    // because both paths are gated by the same duckGeneration check.
+    sound.setOnPlaybackStatusUpdate((s) => {
+      if (!s.isLoaded) {
+        if (s.error) console.warn('[Radar] alert sound playback error:', s.error);
         return;
       }
-      if (status.didJustFinish) {
+      if (s.didJustFinish) {
         sound.unloadAsync().catch(() => {});
         if (currentSound === sound) currentSound = null;
         restoreAudioMode(myGeneration);
       }
     });
+
+    // THE ACTUAL FIX: block this function — and therefore the TaskManager
+    // task handler that's awaiting it — until the clip is guaranteed to be
+    // over. iOS/Android only keep a background task's JS runtime alive
+    // until the promise returned from the task handler resolves. The
+    // previous code resolved the instant playback STARTED, so the OS was
+    // free to suspend the process mid-clip, before the async didJustFinish
+    // bridge message could ever be delivered — the un-duck call then sat
+    // dead until the next unrelated background wake-up (your 8-10 minute
+    // observation: that's the next location fix, not an OS audio timeout).
+    // Sleeping here instead keeps the un-duck inside the SAME guaranteed
+    // execution window the duck happened in.
+    const clipDurationMs =
+      status.isLoaded && status.durationMillis ? status.durationMillis : MAX_ALERT_CLIP_MS;
+    const waitMs = Math.min(clipDurationMs, MAX_ALERT_CLIP_MS) + 300; // buffer past natural end
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+    if (currentSound === sound) {
+      await sound.unloadAsync().catch(() => {});
+      currentSound = null;
+    }
+    await restoreAudioMode(myGeneration);
   } catch (err) {
     console.warn('[Radar] failed to play alert sound:', err);
     // Playback never actually started — this generation has nothing left to
     // finish and fire didJustFinish, so restore immediately instead of
     // leaving the session ducked against a sound that will never complete.
-    restoreAudioMode(myGeneration);
+    await restoreAudioMode(myGeneration);
   }
 };
 
