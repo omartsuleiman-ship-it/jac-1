@@ -365,7 +365,9 @@ export default function RadarScreen() {
           coordinate={[poi.longitude, poi.latitude]}
           onSelected={() => handleDeletePoi(poi)}
         >
-          <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
+          <View>
+            <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
+          </View>
           <MapLibreGL.Callout title={poiLabel(poi)} />
         </MapLibreGL.PointAnnotation>
       )),
@@ -387,13 +389,15 @@ export default function RadarScreen() {
         <MapLibreGL.Camera
           ref={cameraRef}
           defaultSettings={{ centerCoordinate: DEFAULT_CENTER, zoomLevel: 15 }}
-          followUserLocation={isScanning}
+          followUserLocation={isScanning && foregroundPermissionGranted}
           followUserMode={MapLibreGL.UserTrackingModes.FollowWithHeading}
           followZoomLevel={16}
           followPitch={50}
         />
 
-        <MapLibreGL.UserLocation visible showsUserHeadingIndicator />
+        {foregroundPermissionGranted && (
+          <MapLibreGL.UserLocation visible showsUserHeadingIndicator />
+        )}
 
         {markers}
       </MapLibreGL.MapView>
