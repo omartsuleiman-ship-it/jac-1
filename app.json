@@ -33,7 +33,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-     "permissions": [
+      "permissions": [
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_CONNECT",
@@ -96,7 +96,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "19310e3d-624a-4755-9d31-342323a3d1ff"
+        "projectId": "9699e0de-ef06-46c6-820f-7b4b76cc2508"
       }
     }
   }
