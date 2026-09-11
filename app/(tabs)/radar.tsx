@@ -170,6 +170,18 @@ export default function RadarScreen() {
   // on subsequent fixes, hence the one-time ref instead of a dependency.
   const hasCenteredOnFirstFixRef = useRef(false);
 
+  // THE ZOOM BUG: every animateCamera() call in this file only ever
+  // specified center/heading/pitch and left `zoom` out entirely.
+  // react-native-maps treats an omitted `zoom` as "set it to 0" — the
+  // whole-Earth view — not "leave it alone". So every single GPS fix (each
+  // course-up recenter, every LOCATION_TIME_INTERVAL_MS while scanning) was
+  // silently resetting the camera to zoom 0, then immediately fighting any
+  // pinch-to-zoom the user did in between fixes. This ref always holds the
+  // last known real zoom level (seeded from initialCamera.zoom, kept in
+  // sync by onCameraChange on the MapView below) so every animateCamera()
+  // call can explicitly re-assert it instead of letting it be reset.
+  const lastZoomRef = useRef(initialCamera.zoom ?? 15);
+
   // Single source of truth for ALL camera movement, on purpose. iOS's
   // native camera bridge has a well-documented quirk: a PARTIAL
   // animateCamera() call (e.g. center only, omitting heading/pitch) can
@@ -204,6 +216,7 @@ export default function RadarScreen() {
           center,
           heading: hasReliableHeading ? heading : 0,
           pitch: hasReliableHeading ? 50 : 0,
+          zoom: lastZoomRef.current,
         },
         { duration: LOCATION_TIME_INTERVAL_MS }
       );
@@ -218,6 +231,7 @@ export default function RadarScreen() {
       center: { latitude: location.coords.latitude, longitude: location.coords.longitude },
       heading: 0,
       pitch: 0,
+      zoom: lastZoomRef.current,
     });
   }, [location, isScanning]);
 
@@ -383,6 +397,7 @@ export default function RadarScreen() {
       });
       mapRef.current?.animateCamera({
         center: { latitude: result.latitude, longitude: result.longitude },
+        zoom: lastZoomRef.current,
       });
       setSearchModalVisible(false);
       setSearchText('');
@@ -427,6 +442,7 @@ export default function RadarScreen() {
       center,
       heading: useCourseUp ? heading : 0,
       pitch: useCourseUp ? 50 : 0,
+      zoom: lastZoomRef.current,
     });
   }, [location, isScanning]);
 
@@ -490,6 +506,21 @@ export default function RadarScreen() {
         showsMyLocationButton
         showsCompass
         onLongPress={handleLongPress}
+        onRegionChangeComplete={(region: any) => {
+          // Same purpose as onCameraChange — not present in this
+          // react-native-maps version's type definitions, so we use the
+          // older, universally-supported region event instead. This is
+          // what stops the fight with manual pinch-to-zoom: without it, a
+          // user pinch updates the native camera, but the NEXT
+          // animateCamera() call (next GPS fix) would still re-assert a
+          // stale zoom instead of what the user just pinched to. Standard
+          // region-delta → zoom conversion: zoom 0 spans the full 360°
+          // world, so zoom = log2(360 / longitudeDelta).
+          if (region?.longitudeDelta) {
+            const zoom = Math.log2(360 / region.longitudeDelta);
+            if (Number.isFinite(zoom)) lastZoomRef.current = zoom;
+          }
+        }}
       >
         {markers}
         {/* Only rendered OUTSIDE nav mode. In nav mode the camera itself
