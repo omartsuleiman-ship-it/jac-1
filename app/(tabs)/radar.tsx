@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Location from 'expo-location';
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -9,12 +9,11 @@ import {
   Modal,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
-  View,
+  View
 } from 'react-native';
 import MapView, { Camera, Marker } from 'react-native-maps';
 import { LOCATION_TIME_INTERVAL_MS, useRadar } from '../hooks/useRadarWatchdog';
@@ -132,8 +131,9 @@ export default function RadarScreen() {
 
   const [searchModalVisible, setSearchModalVisible] = useState(false);
   const [searchText, setSearchText] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [searchResults, setSearchResults] = useState<Array<{ latitude: number; longitude: number; label: string }>>([]);
+  // true while the user is expected to tap a point on the map (after
+  // pressing "Pin on the map" inside the search modal) instead of typing.
+  const [pinPickMode, setPinPickMode] = useState(false);
 
   const [suggestions, setSuggestions] = useState<Array<{ latitude: number; longitude: number; label: string }>>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
@@ -235,10 +235,20 @@ export default function RadarScreen() {
     });
   }, [location, isScanning]);
 
-  const handleLongPress = useCallback((e: any) => {
-    setPendingCoords(e.nativeEvent.coordinate);
+  // Button-triggered now, not long-press: reports are always added at the
+  // user's OWN current position — same convention as Waze/Google Maps'
+  // report button — not an arbitrary tapped point.
+  const handleOpenAddPoiModal = useCallback(() => {
+    if (!location) {
+      Alert.alert(
+        isAr ? 'الموقع غير متاح' : 'Location unavailable',
+        isAr ? 'انتظر حتى يتحدد موقعك الحالي' : 'Wait until your current location is determined'
+      );
+      return;
+    }
+    setPendingCoords({ latitude: location.coords.latitude, longitude: location.coords.longitude });
     setModalVisible(true);
-  }, []);
+  }, [location, isAr]);
 
   const handleAddPoi = useCallback(
     async (type: RadarPoiType, note?: string) => {
@@ -301,41 +311,6 @@ export default function RadarScreen() {
     [isAr, refreshPois, loadAllPois]
   );
 
-  const formatAddressLabel = (addr: Location.LocationGeocodedAddress): string => {
-    const parts = [addr.name, addr.district, addr.city, addr.subregion].filter(
-      (p, idx, arr) => !!p && arr.indexOf(p) === idx
-    );
-    return parts.length > 0 ? parts.join('، ') : isAr ? 'موقع غير مسمى' : 'Unnamed location';
-  };
-
-  const handleSearchSubmit = useCallback(async () => {
-    const query = searchText.trim();
-    if (!query) return;
-    setSearching(true);
-    try {
-      const geocoded = await Location.geocodeAsync(query);
-      if (!geocoded || geocoded.length === 0) {
-        Alert.alert(isAr ? 'لا توجد نتائج' : 'No results', isAr ? 'لم يتم العثور على هذا المكان' : 'Could not find that place');
-        setSearching(false);
-        return;
-      }
-      const withLabels = await Promise.all(
-        geocoded.slice(0, 8).map(async (g) => {
-          try {
-            const [addr] = await Location.reverseGeocodeAsync({ latitude: g.latitude, longitude: g.longitude });
-            return { latitude: g.latitude, longitude: g.longitude, label: addr ? formatAddressLabel(addr) : query };
-          } catch {
-            return { latitude: g.latitude, longitude: g.longitude, label: query };
-          }
-        })
-      );
-      setSearchResults(withLabels);
-    } catch (error) {
-      Alert.alert(isAr ? 'خطأ' : 'Error', isAr ? 'تعذر البحث الآن' : 'Search failed');
-    }
-    setSearching(false);
-  }, [searchText, isAr]);
-
   useEffect(() => {
     return () => {
       if (suggestionsDebounceRef.current) clearTimeout(suggestionsDebounceRef.current);
@@ -386,10 +361,10 @@ export default function RadarScreen() {
 
   const handleSelectSearchResult = useCallback(
     (result: { latitude: number; longitude: number; label: string }) => {
-      // نطاق ثابت أكبر شوية من الوضع العادي عشان يغطي منطقة/تجمع كامل تقريبًا
-      // (مفيش عندنا بيانات حدود مناطق فعلية نستخدمها). العرض pins عادية
-      // بدون تجميع زي أي وضع تاني، فمفيش خطورة هنج حتى لو العدد زاد شوية.
-      const SEARCH_RADIUS_KM = 8;
+      // نطاق ثابت 5 كم دايمًا الآن — مفيش اختيار نطاق (2/5/10) تاني بقرار
+      // صريح: أي نتيجة بحث أو نقطة مثبّتة على الخريطة بتعرض ردارات 5 كم
+      // حواليها فورًا من غير سؤال إضافي.
+      const SEARCH_RADIUS_KM = 5;
       setCustomView({
         center: { latitude: result.latitude, longitude: result.longitude },
         radiusKm: SEARCH_RADIUS_KM,
@@ -401,28 +376,32 @@ export default function RadarScreen() {
       });
       setSearchModalVisible(false);
       setSearchText('');
-      setSearchResults([]);
       setSuggestions([]);
+      setPinPickMode(false);
     },
     []
   );
 
-  const handleShowSurroundingRadars = useCallback(() => {
-    if (!pendingCoords) return;
-    const coords = pendingCoords;
-    setModalVisible(false);
-    Alert.alert(
-      isAr ? 'إظهار الردارات المحيطة' : 'Show surrounding radars',
-      isAr ? 'اختر نطاق البحث' : 'Choose the radius',
-      [
-        { text: '2 km', onPress: () => setCustomView({ center: coords, radiusKm: 2 }) },
-        { text: '5 km', onPress: () => setCustomView({ center: coords, radiusKm: 5 }) },
-        { text: '10 km', onPress: () => setCustomView({ center: coords, radiusKm: 10 }) },
-        { text: isAr ? 'إلغاء' : 'Cancel', style: 'cancel' },
-      ]
-    );
-    setPendingCoords(null);
-  }, [pendingCoords, isAr]);
+  // "Pin on the map": closes the search modal and arms a ONE-TIME map tap —
+  // the very next onPress on the MapView (below) is treated as the chosen
+  // point, then this mode turns itself off. Reuses handleSelectSearchResult
+  // so the fixed-5km behavior is identical whether the point came from
+  // typing or tapping.
+  const handleStartPinOnMap = useCallback(() => {
+    setSearchModalVisible(false);
+    setSearchText('');
+    setSuggestions([]);
+    setPinPickMode(true);
+  }, []);
+
+  const handleMapPress = useCallback(
+    (e: any) => {
+      if (!pinPickMode) return;
+      const { latitude, longitude } = e.nativeEvent.coordinate;
+      handleSelectSearchResult({ latitude, longitude, label: isAr ? 'موقع مخصص' : 'Pinned location' });
+    },
+    [pinPickMode, handleSelectSearchResult, isAr]
+  );
 
   const handleRecenter = useCallback(() => {
     setCustomView(null); // ارجع لعرض الردارات القريبة من موقعك الحقيقي
@@ -505,7 +484,7 @@ export default function RadarScreen() {
         showsUserLocation={false}
         showsMyLocationButton
         showsCompass
-        onLongPress={handleLongPress}
+        onPress={handleMapPress}
         onRegionChangeComplete={(region: any) => {
           // Same purpose as onCameraChange — not present in this
           // react-native-maps version's type definitions, so we use the
@@ -563,6 +542,14 @@ export default function RadarScreen() {
         <Ionicons name="layers-outline" size={22} color="#FFFFFF" />
       </Pressable>
 
+      <Pressable style={styles.searchRadarsButton} onPress={() => setSearchModalVisible(true)}>
+        <Ionicons name="search" size={22} color="#FFFFFF" />
+      </Pressable>
+
+      <Pressable style={styles.addPoiButton} onPress={handleOpenAddPoiModal}>
+        <Ionicons name="add" size={26} color="#FFFFFF" />
+      </Pressable>
+
       <View style={styles.topOverlay} pointerEvents="box-none">
         <Pressable
           style={[styles.scanButton, isScanning ? styles.scanButtonActive : styles.scanButtonInactive]}
@@ -573,11 +560,6 @@ export default function RadarScreen() {
             {isScanning ? (isAr ? 'إيقاف المسح' : 'Stop Scan') : isAr ? 'ابدأ المسح' : 'Start Scan'}
           </Text>
         </Pressable>
-
-        <View style={styles.topRow}>
-          <Pressable style={styles.searchButton} onPress={() => setSearchModalVisible(true)}>
-            <Ionicons name="search" size={20} color="#FFFFFF" />
-          </Pressable>
 
           <View style={styles.toggleCard}>
               <Text style={styles.toggleLabel}>
@@ -596,7 +578,14 @@ export default function RadarScreen() {
               thumbColor="#FFFFFF"
             />
           </View>
-        </View>
+
+        {pinPickMode && (
+          <View style={styles.customViewBanner}>
+            <Text style={styles.permissionText}>
+              {isAr ? 'اضغط على أي نقطة بالخريطة لتحديد الموقع' : 'Tap anywhere on the map to pick a location'}
+            </Text>
+          </View>
+        )}
 
         {customView && (
           <View style={styles.customViewBanner}>
@@ -694,14 +683,6 @@ export default function RadarScreen() {
               <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
             </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: COLORS.active }]}
-              onPress={handleShowSurroundingRadars}
-            >
-              <Ionicons name="radio" size={20} color={COLORS.active} />
-              <Text style={styles.modalOptionText}>{isAr ? 'إظهار الردارات المحيطة' : 'Show surrounding radars'}</Text>
-            </Pressable>
-
             <Pressable style={styles.modalCancel} onPress={() => setModalVisible(false)}>
               <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
             </Pressable>
@@ -766,7 +747,6 @@ export default function RadarScreen() {
                 placeholder={isAr ? 'مثال: التجمع الخامس' : 'e.g. Maadi'}
                 placeholderTextColor={COLORS.inactive}
                 autoFocus
-                onSubmitEditing={handleSearchSubmit}
               />
 
               {suggestionsLoading && (
@@ -788,30 +768,9 @@ export default function RadarScreen() {
                 />
               )}
 
-              {searchResults.length > 0 && (
-                <ScrollView style={styles.searchResultsList} keyboardShouldPersistTaps="handled">
-                  {searchResults.map((r, idx: number) => (
-                    <Pressable
-                      key={`${r.latitude}-${r.longitude}-${idx}`}
-                      style={styles.searchResultRow}
-                      onPress={() => handleSelectSearchResult(r)}
-                    >
-                      <Ionicons name="location" size={16} color={COLORS.active} />
-                      <Text style={styles.searchResultText}>{r.label}</Text>
-                    </Pressable>
-                  ))}
-                </ScrollView>
-              )}
-
-              <Pressable
-                style={[styles.modalOption, { borderColor: COLORS.active, opacity: searching ? 0.5 : 1 }]}
-                onPress={handleSearchSubmit}
-                disabled={searching}
-              >
-                <Ionicons name="search" size={20} color={COLORS.active} />
-                <Text style={styles.modalOptionText}>
-                  {searching ? (isAr ? 'جاري البحث...' : 'Searching...') : isAr ? 'بحث' : 'Search'}
-                </Text>
+              <Pressable style={[styles.modalOption, { borderColor: COLORS.active }]} onPress={handleStartPinOnMap}>
+                <Ionicons name="location-outline" size={20} color={COLORS.active} />
+                <Text style={styles.modalOptionText}>{isAr ? 'حدد على الخريطة' : 'Pin on the map'}</Text>
               </Pressable>
 
               <Pressable
@@ -819,7 +778,6 @@ export default function RadarScreen() {
                 onPress={() => {
                   setSearchModalVisible(false);
                   setSearchText('');
-                  setSearchResults([]);
                   setSuggestions([]);
                 }}
               >
@@ -947,6 +905,30 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  searchRadarsButton: {
+    position: 'absolute',
+    bottom: 132,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addPoiButton: {
+    position: 'absolute',
+    bottom: 188,
+    right: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.active,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   scanButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -969,21 +951,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     marginLeft: 8,
-  },
-  topRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  searchButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.tabBarBg,
-    borderColor: COLORS.tabBarBorder,
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   customViewBanner: {
     alignSelf: 'stretch',
