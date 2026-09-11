@@ -30,6 +30,27 @@ import { COLORS, useLang } from './_layout';
 
 MapLibreGL.setAccessToken(null);
 
+// إعدادات خريطة القمر الصناعي المجانية (Esri World Imagery)
+const satelliteStyle = JSON.stringify({
+  version: 8,
+  sources: {
+    rasterTiles: {
+      type: 'raster',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+      tileSize: 256,
+    },
+  },
+  layers: [
+    {
+      id: 'raster-layer',
+      type: 'raster',
+      source: 'rasterTiles',
+      minzoom: 0,
+      maxzoom: 22,
+    },
+  ],
+});
+
 const PIN_COLORS: Record<RadarPoiType, string> = {
   radar: '#FF3B30',
   bump: '#FFB020',
@@ -342,10 +363,10 @@ export default function RadarScreen() {
           key={poi.id}
           id={poi.id}
           coordinate={[poi.longitude, poi.latitude]}
-          title={poiLabel(poi)}
           onSelected={() => handleDeletePoi(poi)}
         >
           <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
+          <MapLibreGL.Callout title={poiLabel(poi)} />
         </MapLibreGL.PointAnnotation>
       )),
     [displayedPois, poiLabel, handleDeletePoi]
@@ -356,7 +377,11 @@ export default function RadarScreen() {
       <MapLibreGL.MapView
         ref={mapRef}
         style={{ flex: 1 }}
-        styleURL="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json"
+        styleURL={
+          mapType === 'standard'
+            ? 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json'
+            : satelliteStyle
+        }
         onPress={handleMapPress}
       >
         <MapLibreGL.Camera
@@ -623,14 +648,6 @@ export default function RadarScreen() {
 
 const styles = StyleSheet.create({
  container: { flex: 1, backgroundColor: COLORS.background },
-  navArrowContainer: {
-    position: 'absolute',
-    left: '50%',
-    marginLeft: -17, // half of icon size (34), to horizontally center it
-    marginTop: -17,  // half of icon size, to vertically center on `top`
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   topOverlay: {
     position: 'absolute',
     top: 50,
