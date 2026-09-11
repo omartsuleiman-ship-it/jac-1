@@ -1,6 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-// @ts-ignore
-import MapLibreGL from '@maplibre/maplibre-react-native';
+import { Camera, Map, UserLocation, ViewAnnotation } from '@maplibre/maplibre-react-native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -27,8 +26,6 @@ import {
   saveUserPoi
 } from '../services/radarService';
 import { COLORS, useLang } from './_layout';
-
-MapLibreGL.setAccessToken(null);
 
 // إعدادات خريطة القمر الصناعي المجانية (Esri World Imagery)
 const satelliteStyle = JSON.stringify({
@@ -93,8 +90,8 @@ export default function RadarScreen() {
   const [commentModalVisible, setCommentModalVisible] = useState(false);
   const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
-  const mapRef = useRef<MapLibreGL.MapView>(null);
-  const cameraRef = useRef<MapLibreGL.Camera>(null);
+  const mapRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
   // 'standard' (vector tiles) uses far less GPU/battery than satellite
   // imagery — default to it and let the user opt into satellite explicitly.
   // 'hybrid', not 'satellite': plain 'satellite' is raw imagery with ZERO
@@ -277,10 +274,10 @@ export default function RadarScreen() {
         radiusKm: SEARCH_RADIUS_KM,
         label: result.label,
       });
-      cameraRef.current?.setCamera({
-        centerCoordinate: [result.longitude, result.latitude],
-        zoomLevel: 15,
-        animationDuration: 500,
+      cameraRef.current?.setStop({
+        center: [result.longitude, result.latitude],
+        zoom: 15,
+        duration: 500,
       });
       setSearchModalVisible(false);
       setSearchText('');
@@ -303,9 +300,9 @@ export default function RadarScreen() {
   }, []);
 
   const handleMapPress = useCallback(
-    (feature: any) => {
+    (event: any) => {
       if (!pinPickMode) return;
-      const [longitude, latitude] = feature.geometry.coordinates;
+      const [longitude, latitude] = event.nativeEvent.lngLat;
       handleSelectSearchResult({ latitude, longitude, label: isAr ? 'موقع مخصص' : 'Pinned location' });
     },
     [pinPickMode, handleSelectSearchResult, isAr]
@@ -317,10 +314,10 @@ export default function RadarScreen() {
     // No manual heading math needed — <Camera followUserLocation
     // followUserMode={FollowWithHeading}> below already keeps the map
     // course-up continuously. This just snaps back to it if the user panned away.
-    cameraRef.current?.setCamera({
-      centerCoordinate: [location.coords.longitude, location.coords.latitude],
-      zoomLevel: 15,
-      animationDuration: 500,
+    cameraRef.current?.setStop({
+      center: [location.coords.longitude, location.coords.latitude],
+      zoom: 15,
+      duration: 500,
     });
   }, [location]);
 
@@ -359,48 +356,45 @@ export default function RadarScreen() {
   const markers = useMemo(
     () =>
       displayedPois.map((poi) => (
-        <MapLibreGL.PointAnnotation
+        <ViewAnnotation
           key={poi.id}
-          id={poi.id}
-          coordinate={[poi.longitude, poi.latitude]}
-          onSelected={() => handleDeletePoi(poi)}
+          lngLat={[poi.longitude, poi.latitude]}
+          onSelect={() => handleDeletePoi(poi)}
         >
           <View>
             <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
           </View>
-          <MapLibreGL.Callout title={poiLabel(poi)} />
-        </MapLibreGL.PointAnnotation>
+        </ViewAnnotation>
       )),
     [displayedPois, poiLabel, handleDeletePoi]
   );
 
   return (
     <View style={styles.container}>
-      <MapLibreGL.MapView
+      <Map
         ref={mapRef}
         style={{ flex: 1 }}
-        styleURL={
+        mapStyle={
           mapType === 'standard'
             ? 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json'
             : satelliteStyle
         }
         onPress={handleMapPress}
       >
-        <MapLibreGL.Camera
+        <Camera
           ref={cameraRef}
-          defaultSettings={{ centerCoordinate: DEFAULT_CENTER, zoomLevel: 15 }}
-          followUserLocation={isScanning && foregroundPermissionGranted}
-          followUserMode={MapLibreGL.UserTrackingModes.FollowWithHeading}
-          followZoomLevel={16}
-          followPitch={50}
+          initialViewState={{ center: DEFAULT_CENTER, zoom: 15 }}
+          trackUserLocation={isScanning && foregroundPermissionGranted ? 'course' : undefined}
+          zoom={16}
+          pitch={isScanning ? 50 : 0}
         />
 
         {foregroundPermissionGranted && (
-          <MapLibreGL.UserLocation visible showsUserHeadingIndicator />
+          <UserLocation />
         )}
 
         {markers}
-      </MapLibreGL.MapView>
+      </Map>
 
       <Pressable style={styles.recenterButton} onPress={handleRecenter}>
         <Ionicons name="locate" size={22} color="#FFFFFF" />
