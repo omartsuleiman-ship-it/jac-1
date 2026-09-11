@@ -95,7 +95,6 @@ export default function RadarScreen() {
     location,
     nearbyPois,
     foregroundPermissionGranted,
-    backgroundPermissionGranted,
     isScanning,
     startScanning,
     stopScanning,
@@ -603,15 +602,6 @@ export default function RadarScreen() {
               {isAr
                 ? 'يجب السماح بالوصول للموقع لتفعيل تنبيهات الرادار'
                 : 'Location permission is required for radar alerts'}
-            </Text>
-          </View>
-        )}
-        {foregroundPermissionGranted && !backgroundPermissionGranted && (
-          <View style={styles.permissionBanner}>
-            <Text style={styles.permissionText}>
-              {isAr
-                ? 'التنبيهات ستعمل فقط أثناء فتح التطبيق. اسمح بالوصول للموقع "دائماً" من الإعدادات لتعمل والشاشة مقفلة'
-                : 'Alerts will only work while the app is open. Allow "Always" location access in Settings for screen-off alerts'}
             </Text>
           </View>
         )}

@@ -486,7 +486,6 @@ interface RadarContextValue {
   location: Location.LocationObject | null;
   nearbyPois: RadarPoi[]; // 5km slice, for map rendering
   foregroundPermissionGranted: boolean;
-  backgroundPermissionGranted: boolean; // must be true for alerts to survive screen-off
   isScanning: boolean; // whether the background location task is actively running
   startScanning: () => void;
   stopScanning: () => void;
@@ -511,7 +510,6 @@ function useRadarEngine() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [nearbyPois, setNearbyPois] = useState<RadarPoi[]>([]);
   const [foregroundPermissionGranted, setForegroundPermissionGranted] = useState(false);
-  const [backgroundPermissionGranted, setBackgroundPermissionGranted] = useState(false);
   // Scanning is now a deliberate user action, not automatic on tab open —
   // startLocationUpdatesAsync only ever runs while this is true.
   const [isScanning, setIsScanning] = useState(false);
@@ -656,14 +654,16 @@ function useRadarEngine() {
 
       // Background permission is a SEPARATE grant from foreground on both
       // platforms (iOS: "Change to Always Allow" follow-up; Android 10+: a
-      // second system dialog). Must be granted for updates to keep arriving
-      // with the screen off / app backgrounded. Same check-before-request pattern.
-      let bgStatus = (await Location.getBackgroundPermissionsAsync()).status;
+      // second system dialog). Still requested opportunistically for better
+      // background reliability — nothing branches on the result anymore,
+      // since foreground permission alone is sufficient to start tracking
+      // below. Same check-before-request pattern as foreground, to avoid an
+      // unnecessary re-prompt when it's already granted.
+      const { status: bgStatus } = await Location.getBackgroundPermissionsAsync();
       if (bgStatus !== 'granted') {
-        bgStatus = (await Location.requestBackgroundPermissionsAsync()).status;
+        await Location.requestBackgroundPermissionsAsync();
       }
       if (cancelled) return;
-      setBackgroundPermissionGranted(bgStatus === 'granted');
 
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (alreadyRunning || cancelled) return;
@@ -718,7 +718,6 @@ function useRadarEngine() {
     location,
     nearbyPois,
     foregroundPermissionGranted,
-    backgroundPermissionGranted,
     isScanning,
     startScanning,
     stopScanning,
