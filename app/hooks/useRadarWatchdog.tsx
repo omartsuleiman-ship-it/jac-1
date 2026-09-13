@@ -157,10 +157,23 @@ const projectAlongAndCrossTrack = (
   };
 };
 
-// Corridor half-width in meters: a couple of lanes plus margin close in,
-// widening mildly with distance to absorb GPS heading noise, but capped
-// well short of what the old 45° cone allowed at range.
-const corridorHalfWidthM = (distanceM: number): number => Math.min(45, 20 + distanceM * 0.03);
+// Hard relative-bearing cutoff, independent of distance: anything further
+// off-axis than this is a different road (side street, an opposite
+// carriageway sitting at a real angle, or a road crossing at range) — not
+// a curve. A normal curving road rarely swings a driver's instantaneous
+// heading this far relative to a point that's still meaningfully "ahead".
+// This is what lets the meters-based tolerance below be generous for
+// curves without reopening the door to genuinely unrelated roads.
+const MAX_RELATIVE_BEARING_DEG = 65;
+
+// Corridor half-width in meters. The old 20 + distanceM*0.03 (max 45m) only
+// budgeted for GPS heading jitter on a straight road — a routine 30° bend
+// 150m out produces ~75m of cross-track offset purely from road curvature,
+// which that formula rejected outright (false negative: a real radar on
+// the curve ahead gets silently dropped). This grows faster and further to
+// actually absorb normal curves; MAX_RELATIVE_BEARING_DEG above is now the
+// line of defense against unrelated roads, not this number.
+const corridorHalfWidthM = (distanceM: number): number => Math.min(90, 20 + distanceM * 0.12);
 
 interface LastAlertMemory {
   id: string;
@@ -430,10 +443,18 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
     if (heading === null || heading === undefined || heading < 0) continue;
     const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
 
-    // Corridor check (Edge Case 2 — replaces the bare 45° cone): must be
-    // genuinely ahead along my heading AND within a road-width-sized
-    // sideways offset of my actual line of travel — not just anywhere
-    // inside a wide angular cone.
+    // Hard angle cutoff FIRST, independent of distance — this is what
+    // actually rejects unrelated roads now (a genuine side street, or a
+    // road crossing at a real angle from far away). It runs before the
+    // meters-based check below on purpose: without it, the wider corridor
+    // needed to tolerate curves would also start accepting angled roads
+    // it shouldn't.
+    if (angularDiff(heading, bearing) > MAX_RELATIVE_BEARING_DEG) continue;
+
+    // Corridor check (Edge Case 2): must be genuinely ahead along my
+    // heading AND within a distance-scaled sideways offset of my actual
+    // line of travel — generous enough now to absorb a normal curve, not
+    // just GPS heading jitter on a straight road.
     const { alongTrackM, crossTrackM } = projectAlongAndCrossTrack(distance, heading, bearing);
     if (alongTrackM <= 0) continue; // behind me along my heading — never alert
     if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) continue; // off to the side — different road
