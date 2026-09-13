@@ -64,7 +64,12 @@ const SMART_ALERTS_STORAGE_KEY = '@radar_map/smart_alerts_v1';
 // "this new candidate is the twin-lane copy of the one I just played",
 // without permanently blocking a genuine return-trip camera after a U-turn.
 const ALERT_MEMORY_STORAGE_KEY = '@radar_map/last_alert_memory_v1';
-const TWIN_RADAR_RADIUS_M = 100; // parallel-lane radars mapped this close are treated as one alert
+// Bumped from 100m: a wide highway cross-section (fast + slow lane, plus
+// 1-2 opposite-carriageway cameras across a median) can span more than
+// 100m end-to-end between the outermost cameras. 100m was tight enough
+// that the outermost twin could sit juuust past the radius and get read
+// as a "new" radar rather than a duplicate.
+const TWIN_RADAR_RADIUS_M = 180; // parallel-lane / opposite-carriageway radars mapped this close are treated as one alert
 const U_TURN_HEADING_DELTA_DEG = 90; // heading swing past this = a genuine U-turn, not just a curve
 
 export const RADAR_LOCATION_TASK = 'radar-background-location-task';
@@ -112,6 +117,24 @@ export const isRadarIdle = () => radarIsIdle;
 // re-alerts. Module-level for the same headless-task reason as
 // stationarySinceMs/radarIsIdle above.
 const passedRadarLedger: Record<string, number> = {};
+
+// ── Alert-in-flight lock (fixes the multi-camera-cluster "broken record"
+// bug) ── playRadarSound() blocks for ~6+ seconds so the JS runtime stays
+// alive long enough for the clip to finish. But expo-location keeps
+// delivering new fixes every LOCATION_TIME_INTERVAL_MS (1s) the whole time,
+// and TaskManager.defineTask does NOT serialize overlapping invocations —
+// a new fix arriving mid-clip starts a completely separate, concurrent run
+// of this same async function. That run calls loadLastAlertMemory() and
+// reads the SAME stale AsyncStorage value the first run hasn't finished
+// writing yet (the write only happens at the very end of the candidate
+// loop), so it independently "discovers" the exact same radar — or its
+// twin-lane/opposite-carriageway neighbor — as unmuted and plays its own
+// alert. Repeat every second for the ~6s the clip is out, and you get
+// exactly the rapid-fire "Radar 120... Radar 120..." repeat. A plain
+// synchronous, in-memory boolean set the INSTANT a clip starts (not after
+// any await) closes that gap completely: it costs nothing to check, and
+// nothing async can race it.
+let alertPlaybackInFlight = false;
 
 const toRadLocal = (deg: number) => (deg * Math.PI) / 180;
 
@@ -352,6 +375,12 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   // Speed crossing back above the threshold resumes normal checks on the very next fix.
   if (updateIdleTracking(speedKmh)) return;
 
+  // A clip from a PREVIOUS fix is still playing — this fix belongs to the
+  // same physical camera zone that's already being announced. Bail before
+  // touching AsyncStorage or the candidate loop at all: this single check
+  // is what actually closes the concurrent-invocation race described above.
+  if (alertPlaybackInFlight) return;
+
   // Read settings fresh every invocation. This task may run in a headless
   // JS instance with nothing else mounted, so it can't read React context —
   // it reads the same AsyncStorage keys the foreground UI writes to.
@@ -431,9 +460,22 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
     }
 
     if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
-      await playRadarSound(poi, isAr);
+      // Lock SYNCHRONOUSLY, before the first await — this runs in the same
+      // tick as the check above, so there's no window for a concurrent
+      // invocation to slip through between "decided to alert" and
+      // "actually locked". activeAlert is updated immediately too (not
+      // only after playRadarSound resolves), so the REST of this same loop
+      // — the other cameras in this cluster — already sees it this pass.
+      alertPlaybackInFlight = true;
       activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
       alertMemoryDirty = true;
+      try {
+        await playRadarSound(poi, isAr);
+      } finally {
+        // ALWAYS release the lock, even if playback threw — a lock stuck
+        // "in flight" forever would silence every future alert.
+        alertPlaybackInFlight = false;
+      }
     }
   }
 
