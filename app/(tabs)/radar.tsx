@@ -90,15 +90,28 @@ export default function RadarScreen() {
   const [commentModalVisible, setCommentModalVisible] = useState(false);
   const [commentText, setCommentText] = useState('');
   const [pendingCoords, setPendingCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  // Two-step Add POI flow: step 1 picks a TYPE (radar/bump/...), step 2 asks
+  // WHERE (current location vs. pin on the map). null selectedPoiType means
+  // the modal is showing step 1.
+  const [selectedPoiType, setSelectedPoiType] = useState<RadarPoiType | null>(null);
+  // Set only when "Pin on the map" was chosen in step 2 — tells
+  // handleMapPress this armed tap is placing a NEW POI of this type, not
+  // picking a search location (the other thing pinPickMode is reused for).
+  const [pendingPoiType, setPendingPoiType] = useState<RadarPoiType | null>(null);
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
   // 'standard' (vector tiles) uses far less GPU/battery than satellite
   // imagery — default to it and let the user opt into satellite explicitly.
-  // 'hybrid', not 'satellite': plain 'satellite' is raw imagery with ZERO
-  // road names, city labels, or POIs overlaid — that's what was rendering
-  // as an empty satellite view. 'hybrid' is imagery WITH the label overlay
-  // on top, same as what Google/Apple Maps call "Satellite" in their own UI.
-  const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
+  // Dark mode is now a manual pick from this same menu, not tied to the
+  // system theme.
+  const [mapType, setMapType] = useState<'standard' | 'dark' | 'satellite'>('standard');
+  const [styleMenuOpen, setStyleMenuOpen] = useState(false);
+
+  const mapStyleURL = useMemo(() => {
+    if (mapType === 'dark') return 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+    if (mapType === 'satellite') return satelliteStyle;
+    return 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+  }, [mapType]);
 
   const [allPois, setAllPois] = useState<RadarPoi[]>([]);
   // لما ده يبقى فيه قيمة، الماب بتعرض ردارات منطقة معينة (بحث أو نقطة
@@ -155,13 +168,18 @@ export default function RadarScreen() {
   }, [location, isAr]);
 
   const handleAddPoi = useCallback(
-    async (type: RadarPoiType, note?: string) => {
-      if (!pendingCoords) return;
+    async (type: RadarPoiType, note?: string, coordsOverride?: { latitude: number; longitude: number }) => {
+      // coordsOverride lets the map-tap path (handleMapPress below) pass
+      // fresh coordinates directly instead of relying on pendingCoords —
+      // setState is async, so a caller that just called setPendingCoords()
+      // in the same tick would otherwise read the STALE value here.
+      const coords = coordsOverride ?? pendingCoords;
+      if (!coords) return;
       const poi: RadarPoi = {
         id: `user-${Date.now()}`,
         type,
-        latitude: pendingCoords.latitude,
-        longitude: pendingCoords.longitude,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
         maxspeed: null,
         note,
         source: 'user',
@@ -177,6 +195,7 @@ export default function RadarScreen() {
       setCommentModalVisible(false);
       setCommentText('');
       setPendingCoords(null);
+      setSelectedPoiType(null);
     },
     [pendingCoords, refreshPois, loadAllPois, isAr]
   );
@@ -299,13 +318,44 @@ export default function RadarScreen() {
     setPinPickMode(true);
   }, []);
 
+  // Step 1 → step 2 of the Add POI modal: remembers the chosen type instead
+  // of adding immediately, and swaps the modal body to the "Where?" prompt.
+  const handleSelectPoiType = useCallback((type: RadarPoiType) => {
+    setSelectedPoiType(type);
+  }, []);
+
+  const handleAddAtCurrentLocation = useCallback(() => {
+    if (!selectedPoiType || !location) return;
+    handleAddPoi(selectedPoiType, undefined, {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+    });
+  }, [selectedPoiType, location, handleAddPoi]);
+
+  const handlePinPoiOnMap = useCallback(() => {
+    if (!selectedPoiType) return;
+    setPendingPoiType(selectedPoiType);
+    setSelectedPoiType(null);
+    setModalVisible(false);
+    setPinPickMode(true);
+  }, [selectedPoiType]);
+
   const handleMapPress = useCallback(
     (event: any) => {
       if (!pinPickMode) return;
       const [longitude, latitude] = event.nativeEvent.lngLat;
+
+      if (pendingPoiType) {
+        const type = pendingPoiType;
+        setPendingPoiType(null);
+        setPinPickMode(false);
+        handleAddPoi(type, undefined, { latitude, longitude });
+        return;
+      }
+
       handleSelectSearchResult({ latitude, longitude, label: isAr ? 'موقع مخصص' : 'Pinned location' });
     },
-    [pinPickMode, handleSelectSearchResult, isAr]
+    [pinPickMode, pendingPoiType, handleAddPoi, handleSelectSearchResult, isAr]
   );
 
   const handleRecenter = useCallback(() => {
@@ -321,8 +371,13 @@ export default function RadarScreen() {
     });
   }, [location]);
 
-  const toggleMapType = useCallback(() => {
-    setMapType((prev) => (prev === 'standard' ? 'hybrid' : 'standard'));
+  const toggleStyleMenu = useCallback(() => {
+    setStyleMenuOpen((prev) => !prev);
+  }, []);
+
+  const selectMapType = useCallback((type: 'standard' | 'dark' | 'satellite') => {
+    setMapType(type);
+    setStyleMenuOpen(false);
   }, []);
 
   const poiLabel = useCallback(
@@ -371,16 +426,7 @@ export default function RadarScreen() {
 
   return (
     <View style={styles.container}>
-      <Map
-        ref={mapRef}
-        style={{ flex: 1 }}
-        mapStyle={
-          mapType === 'standard'
-            ? 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json'
-            : satelliteStyle
-        }
-        onPress={handleMapPress}
-      >
+      <Map ref={mapRef} style={{ flex: 1 }} mapStyle={mapStyleURL} onPress={handleMapPress}>
         <Camera
           ref={cameraRef}
           initialViewState={{ center: DEFAULT_CENTER, zoom: 15 }}
@@ -390,7 +436,7 @@ export default function RadarScreen() {
         />
 
         {foregroundPermissionGranted && (
-          <UserLocation />
+          <UserLocation heading />
         )}
 
         {markers}
@@ -400,12 +446,35 @@ export default function RadarScreen() {
         <Ionicons name="locate" size={22} color="#FFFFFF" />
       </Pressable>
 
-      <Pressable style={styles.layersButton} onPress={toggleMapType}>
+      <Pressable style={styles.layersButton} onPress={toggleStyleMenu}>
         <Ionicons name="layers-outline" size={22} color="#FFFFFF" />
       </Pressable>
 
+      {styleMenuOpen && (
+        <View style={styles.mapStyleMenu}>
+          <Pressable
+            style={[styles.mapStyleMenuButton, mapType === 'standard' && styles.mapStyleMenuButtonActive]}
+            onPress={() => selectMapType('standard')}
+          >
+            <Ionicons name="sunny-outline" size={18} color="#FFFFFF" />
+          </Pressable>
+          <Pressable
+            style={[styles.mapStyleMenuButton, mapType === 'dark' && styles.mapStyleMenuButtonActive]}
+            onPress={() => selectMapType('dark')}
+          >
+            <Ionicons name="moon-outline" size={18} color="#FFFFFF" />
+          </Pressable>
+          <Pressable
+            style={[styles.mapStyleMenuButton, mapType === 'satellite' && styles.mapStyleMenuButtonActive]}
+            onPress={() => selectMapType('satellite')}
+          >
+            <Ionicons name="globe-outline" size={18} color="#FFFFFF" />
+          </Pressable>
+        </View>
+      )}
+
       <Pressable style={styles.searchRadarsButton} onPress={() => setSearchModalVisible(true)}>
-        <Ionicons name="search" size={22} color="#FFFFFF" />
+        <Ionicons name="radio" size={22} color="#FFFFFF" />
       </Pressable>
 
       <Pressable style={styles.addPoiButton} onPress={handleOpenAddPoiModal}>
@@ -475,70 +544,103 @@ export default function RadarScreen() {
         <Text style={styles.speedUnit}>{isAr ? 'كم/س' : 'km/h'}</Text>
       </View>
 
-      <Modal visible={modalVisible} transparent animationType="fade" onRequestClose={() => setModalVisible(false)}>
+      <Modal
+        visible={modalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setModalVisible(false);
+          setSelectedPoiType(null);
+        }}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>{isAr ? 'إضافة نقطة' : 'Add a point'}</Text>
+            {!selectedPoiType ? (
+              <>
+                <Text style={styles.modalTitle}>{isAr ? 'إضافة نقطة' : 'Add a point'}</Text>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.radar }]}
-              onPress={() => handleAddPoi('radar')}
-            >
-              <Image source={POI_ICON_IMAGES.radar} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'رادار' : 'Radar'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.radar }]}
+                  onPress={() => handleSelectPoiType('radar')}
+                >
+                  <Image source={POI_ICON_IMAGES.radar} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'رادار' : 'Radar'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.bump }]}
-              onPress={() => handleAddPoi('bump')}
-            >
-              <Image source={POI_ICON_IMAGES.bump} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'مطب صناعي' : 'Speed Bump'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.bump }]}
+                  onPress={() => handleSelectPoiType('bump')}
+                >
+                  <Image source={POI_ICON_IMAGES.bump} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'مطب صناعي' : 'Speed Bump'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.police }]}
-              onPress={() => handleAddPoi('police')}
-            >
-              <Image source={POI_ICON_IMAGES.police} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'نقطة شرطة' : 'Police'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.police }]}
+                  onPress={() => handleSelectPoiType('police')}
+                >
+                  <Image source={POI_ICON_IMAGES.police} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'نقطة شرطة' : 'Police'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.roadwork }]}
-              onPress={() => handleAddPoi('roadwork')}
-            >
-              <Image source={POI_ICON_IMAGES.roadwork} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'أعمال طريق' : 'Roadwork'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.roadwork }]}
+                  onPress={() => handleSelectPoiType('roadwork')}
+                >
+                  <Image source={POI_ICON_IMAGES.roadwork} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'أعمال طريق' : 'Roadwork'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.traffic }]}
-              onPress={() => handleAddPoi('traffic')}
-            >
-              <Image source={POI_ICON_IMAGES.traffic} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'زحمة مرور' : 'Traffic Jam'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.traffic }]}
+                  onPress={() => handleSelectPoiType('traffic')}
+                >
+                  <Image source={POI_ICON_IMAGES.traffic} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'زحمة مرور' : 'Traffic Jam'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.accident }]}
-              onPress={() => handleAddPoi('accident')}
-            >
-              <Image source={POI_ICON_IMAGES.accident} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'حادث' : 'Accident'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.accident }]}
+                  onPress={() => handleSelectPoiType('accident')}
+                >
+                  <Image source={POI_ICON_IMAGES.accident} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'حادث' : 'Accident'}</Text>
+                </Pressable>
 
-            <Pressable
-              style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]}
-              onPress={handleOpenCommentInput}
-            >
-              <Image source={POI_ICON_IMAGES.comment} style={styles.modalOptionIcon} resizeMode="contain" />
-              <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
-            </Pressable>
+                <Pressable
+                  style={[styles.modalOption, { borderColor: PIN_COLORS.comment }]}
+                  onPress={handleOpenCommentInput}
+                >
+                  <Image source={POI_ICON_IMAGES.comment} style={styles.modalOptionIcon} resizeMode="contain" />
+                  <Text style={styles.modalOptionText}>{isAr ? 'ملاحظة' : 'Comment'}</Text>
+                </Pressable>
 
-            <Pressable style={styles.modalCancel} onPress={() => setModalVisible(false)}>
-              <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
-            </Pressable>
+                <Pressable style={styles.modalCancel} onPress={() => setModalVisible(false)}>
+                  <Text style={styles.modalCancelText}>{isAr ? 'إلغاء' : 'Cancel'}</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.modalTitle}>{isAr ? 'أين؟' : 'Where?'}</Text>
+
+                <Pressable
+                  style={[styles.modalOption, { borderColor: COLORS.active }]}
+                  onPress={handleAddAtCurrentLocation}
+                >
+                  <Ionicons name="locate" size={20} color={COLORS.active} />
+                  <Text style={styles.modalOptionText}>{isAr ? 'موقعك الحالي' : 'Current Location'}</Text>
+                </Pressable>
+
+                <Pressable style={[styles.modalOption, { borderColor: COLORS.active }]} onPress={handlePinPoiOnMap}>
+                  <Ionicons name="location-outline" size={20} color={COLORS.active} />
+                  <Text style={styles.modalOptionText}>{isAr ? 'حدد على الخريطة' : 'Pin on the map'}</Text>
+                </Pressable>
+
+                <Pressable style={styles.modalCancel} onPress={() => setSelectedPoiType(null)}>
+                  <Text style={styles.modalCancelText}>{isAr ? 'رجوع' : 'Back'}</Text>
+                </Pressable>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -749,6 +851,30 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  mapStyleMenu: {
+    position: 'absolute',
+    bottom: 76,
+    right: 76,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
+    borderRadius: 24,
+    paddingHorizontal: 6,
+    height: 48,
+  },
+  mapStyleMenuButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 2,
+  },
+  mapStyleMenuButtonActive: {
+    backgroundColor: COLORS.active,
   },
   searchRadarsButton: {
     position: 'absolute',
