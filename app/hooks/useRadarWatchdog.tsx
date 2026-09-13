@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import TrackPlayer, { Capability, RepeatMode } from 'react-native-track-player';
 import { getObdSpeedKmh, subscribeObdSpeed } from '../services/obdSpeedStore';
 import {
   RadarPoi,
@@ -203,153 +203,112 @@ const GENERIC_RADAR_SOUND: Record<'ar' | 'en', any> = {
   ar: require('../assets/sounds/radar_general_ar.mp3'),
 };
 
-// Runs once at module load — same timing guarantee as TaskManager.defineTask
-// below, so playback is configured before the first alert can possibly
-// fire, including on a cold headless-JS start with the screen off.
-const DUCKED_AUDIO_MODE = {
-  staysActiveInBackground: true,
-  playsInSilentModeIOS: true,
-  // Duck (lower, not pause) whatever's already playing — Spotify, Apple
-  // Music, podcasts, etc. — for the duration of the radar clip, then restore
-  // it automatically when playback stops. Both platforms need to be told
-  // explicitly; iOS and Android each ignore the other's flag.
-  interruptionModeIOS: InterruptionModeIOS.DuckOthers,
-  shouldDuckAndroid: true,
-  interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
-} as const;
+// ── react-native-track-player session (replaces expo-av entirely) ──
+// The old expo-av design fought iOS's headless-task suspension directly:
+// duck → play → race to un-duck before the process got frozen mid-clip.
+// This design sidesteps the race instead of trying to win it:
+// react-native-track-player keeps ONE continuous background audio session
+// alive for the entire scan (a near-silent looping track), the same way
+// Waze/Google Maps never actually stop "playing" while navigating. iOS then
+// never suspends the process between GPS fixes in the first place, because
+// there's a live audio route the whole time — so there's no race to lose.
+// Real alert clips are just temporary track swaps inside that same session;
+// ducking/un-ducking of Spotify/Music/podcasts is handled natively by the
+// OS audio session react-native-track-player owns, not by us toggling
+// interruption-mode flags by hand.
+const SILENT_TRACK_ID = 'radar-silent-keepalive';
+const SILENT_TRACK = {
+  id: SILENT_TRACK_ID,
+  url: require('../assets/sounds/silent.mp3'),
+  title: 'Radar Background Session',
+  artist: 'Radar',
+};
+const ALERT_TRACK_ID = 'radar-alert-clip';
 
-// Symmetric with DUCKED_AUDIO_MODE on purpose — every field the duck mode
-// sets gets an explicit counterpart here, rather than omitting fields and
-// hoping expo-av defaults them back sanely.
-const RESTORED_AUDIO_MODE = {
-  staysActiveInBackground: true,
-  playsInSilentModeIOS: true,
-  interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
-  // No interruptionModeAndroid here on purpose: your installed expo-av
-  // types don't expose a MixWithOthers member for Android, and DoNotMix
-  // would be actively wrong (it seizes audio focus instead of releasing
-  // it). shouldDuckAndroid: false is what actually does the un-ducking on
-  // Android — the interruption-mode enum there only meaningfully
-  // distinguishes DoNotMix vs DuckOthers while something IS ducking.
-  shouldDuckAndroid: false,
-} as const;
+// Real clip length isn't read back from react-native-track-player before
+// playback the way expo-av's createAsync() status was — these are short
+// pre-recorded phrases, so a flat cap is simpler and just as reliable as
+// measuring each file. This is what playRadarSound blocks on before handing
+// control back to the TaskManager task, same reasoning as the old
+// MAX_ALERT_CLIP_MS: the awaiting task handler IS what keeps the JS runtime
+// alive long enough for the clip to actually finish.
+const ALERT_CLIP_WAIT_MS = 6000;
 
-Audio.setAudioModeAsync(DUCKED_AUDIO_MODE).catch((err) =>
-  console.warn('[Radar] failed to configure audio mode:', err)
-);
-
-// Real clip length when expo-av reports it (it reliably does for these
-// bundled local assets), capped as a hard ceiling in case an asset comes
-// back with a null/zero duration. This is what the fix below blocks on —
-// NOT the didJustFinish event, which requires a JS bridge message to be
-// delivered AFTER playback ends and cannot be trusted to arrive before the
-// OS suspends the process while the app is backgrounded.
-const MAX_ALERT_CLIP_MS = 6000;
-
-let currentSound: Audio.Sound | null = null;
-// Monotonically increasing token identifying whichever alert most recently
-// claimed the duck. This is what makes restoration correct regardless of
-// HOW an alert's playback ends (natural finish, interrupted by a newer
-// alert, explicit stop, unmount, or createAsync throwing) — the old design
-// only restored from inside one specific sound's own didJustFinish
-// callback, so any path that ended playback a different way left the
-// session permanently ducked with nothing left to ever undo it.
-let duckGeneration = 0;
-
-// Idempotent and safe to call from any exit path, any number of times. Only
-// actually restores when nothing newer has since claimed the duck — an
-// older, now-abandoned sound's eventual "I finished" callback becomes a
-// no-op instead of racing a newer alert's in-progress duck.
-const restoreAudioMode = async (forGeneration: number) => {
-  if (forGeneration !== duckGeneration) return; // a newer alert now owns the eventual restore
+let playerSetupDone = false;
+const ensurePlayerSetup = async () => {
+  if (playerSetupDone) return;
   try {
-    await Audio.setAudioModeAsync(RESTORED_AUDIO_MODE);
+    await TrackPlayer.setupPlayer();
   } catch (err) {
-    console.warn('[Radar] failed to restore audio mode:', err);
+    // Some versions throw on a second setupPlayer() call ("already been
+    // initialized") — treat that as success rather than surfacing an error.
+  }
+  await TrackPlayer.updateOptions({
+    capabilities: [Capability.Play, Capability.Pause, Capability.Stop],
+    // No skip/seek controls exposed — this is a keep-alive session, not a
+    // media player the user is meant to interact with from lock screen/
+    // notification controls.
+    compactCapabilities: [Capability.Play, Capability.Pause],
+  });
+  playerSetupDone = true;
+};
+
+// Starts (or restarts) the continuous silent loop that keeps the background
+// audio session — and therefore the headless process — alive for the
+// duration of the scan. Called once when scanning starts, and again after
+// every real alert clip finishes.
+const resumeSilentLoop = async () => {
+  try {
+    await ensurePlayerSetup();
+    await TrackPlayer.setRepeatMode(RepeatMode.Track);
+    await TrackPlayer.reset();
+    await TrackPlayer.add(SILENT_TRACK);
+    await TrackPlayer.play();
+  } catch (err) {
+    console.warn('[Radar] failed to (re)start silent keep-alive loop:', err);
   }
 };
 
-// Unloads whatever's currently playing, if anything, WITHOUT restoring —
-// for callers about to immediately duck again for a new sound.
-const unloadCurrentSound = async () => {
-  const sound = currentSound;
-  currentSound = null;
-  if (sound) await sound.unloadAsync().catch(() => {});
-};
-
 // The one function every "this feature is stopping" path (explicit Stop
-// Scan, screen unmount) must call. Stops whatever's audible right now AND
-// guarantees the session actually gets un-ducked, even mid-alert.
+// Scan, screen unmount) must call. Tears the whole session down — kept
+// under its old name so the two existing call sites (stopScanning, the
+// scanning-effect cleanup) don't need to change.
 export const stopAndRestoreCurrentSound = async () => {
-  duckGeneration += 1; // invalidate any in-flight restore still tied to the sound we're about to kill
-  await unloadCurrentSound();
-  await restoreAudioMode(duckGeneration);
+  try {
+    await TrackPlayer.reset();
+    await TrackPlayer.stop();
+  } catch (err) {
+    // Most commonly "player not initialized yet" — a harmless no-op here.
+  }
 };
 
 const playRadarSound = async (poi: RadarPoi, isAr: boolean) => {
   const lang: 'ar' | 'en' = isAr ? 'ar' : 'en';
   const asset = (poi.maxspeed !== null && RADAR_SOUNDS[lang][poi.maxspeed]) || GENERIC_RADAR_SOUND[lang];
 
-  const myGeneration = ++duckGeneration; // this alert now owns the eventual restore
-
   try {
-    // Only one clip should ever be audible at a time. No restore here on
-    // purpose — myGeneration is about to duck again immediately below.
-    await unloadCurrentSound();
+    await ensurePlayerSetup();
+    // Swap the queue to just the alert clip and play it — this doesn't
+    // "stop" the background session, it's still the same continuous audio
+    // track react-native-track-player has held since scanning started, just
+    // playing different content for a few seconds.
+    await TrackPlayer.reset();
+    await TrackPlayer.add({ id: ALERT_TRACK_ID, url: asset, title: 'Radar Alert' });
+    await TrackPlayer.play();
 
-    // Re-assert DuckOthers on every play — a previous alert may have already
-    // restored the session on finish, so DuckOthers can't be assumed active.
-    // staysActiveInBackground + playsInSilentModeIOS stay on continuously —
-    // this is what lets iOS mix the clip into an active phone call route
-    // (or play with the ringer switched to silent), same as Google Maps nav.
-    await Audio.setAudioModeAsync(DUCKED_AUDIO_MODE);
-
-    const { sound, status } = await Audio.Sound.createAsync(asset, { shouldPlay: true });
-    currentSound = sound;
-
-    // Kept as a fast-path for the FOREGROUND case (or any background
-    // invocation lucky enough to still be awake when it fires): if this
-    // fires, it's a no-op the moment the sleep below also tries to restore,
-    // because both paths are gated by the same duckGeneration check.
-    sound.setOnPlaybackStatusUpdate((s) => {
-      if (!s.isLoaded) {
-        if (s.error) console.warn('[Radar] alert sound playback error:', s.error);
-        return;
-      }
-      if (s.didJustFinish) {
-        sound.unloadAsync().catch(() => {});
-        if (currentSound === sound) currentSound = null;
-        restoreAudioMode(myGeneration);
-      }
-    });
-
-    // THE ACTUAL FIX: block this function — and therefore the TaskManager
-    // task handler that's awaiting it — until the clip is guaranteed to be
-    // over. iOS/Android only keep a background task's JS runtime alive
-    // until the promise returned from the task handler resolves. The
-    // previous code resolved the instant playback STARTED, so the OS was
-    // free to suspend the process mid-clip, before the async didJustFinish
-    // bridge message could ever be delivered — the un-duck call then sat
-    // dead until the next unrelated background wake-up (your 8-10 minute
-    // observation: that's the next location fix, not an OS audio timeout).
-    // Sleeping here instead keeps the un-duck inside the SAME guaranteed
-    // execution window the duck happened in.
-    const clipDurationMs =
-      status.isLoaded && status.durationMillis ? status.durationMillis : MAX_ALERT_CLIP_MS;
-    const waitMs = Math.min(clipDurationMs, MAX_ALERT_CLIP_MS) + 300; // buffer past natural end
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-
-    if (currentSound === sound) {
-      await sound.unloadAsync().catch(() => {});
-      currentSound = null;
-    }
-    await restoreAudioMode(myGeneration);
+    // Same reasoning as the old expo-av fix: block this function — and
+    // therefore the TaskManager task handler awaiting it — until the clip
+    // is guaranteed to be over, since that's what keeps the JS runtime
+    // alive for the clip's actual duration.
+    await new Promise((resolve) => setTimeout(resolve, ALERT_CLIP_WAIT_MS));
   } catch (err) {
     console.warn('[Radar] failed to play alert sound:', err);
-    // Playback never actually started — this generation has nothing left to
-    // finish and fire didJustFinish, so restore immediately instead of
-    // leaving the session ducked against a sound that will never complete.
-    await restoreAudioMode(myGeneration);
+  } finally {
+    // ALWAYS resume the silent keep-alive loop, whether the alert played
+    // successfully or not — skipping this on an error path is exactly what
+    // would let the background session (and the whole headless process)
+    // die silently.
+    await resumeSilentLoop();
   }
 };
 
@@ -681,6 +640,12 @@ function useRadarEngine() {
           notificationBody: 'Tracking your location for speed camera alerts.',
         },
       });
+      if (cancelled) return;
+      // Start the continuous background audio session the moment scanning
+      // actually begins (permissions granted, tracking live) — this is what
+      // keeps the headless process from ever being suspended between GPS
+      // fixes, per the architecture discussed above.
+      await resumeSilentLoop();
     })();
 
     // Aggressive cleanup, on purpose: fires both when isScanning flips back
