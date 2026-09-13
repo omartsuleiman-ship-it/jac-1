@@ -71,6 +71,12 @@ const ALERT_MEMORY_STORAGE_KEY = '@radar_map/last_alert_memory_v1';
 // as a "new" radar rather than a duplicate.
 const TWIN_RADAR_RADIUS_M = 180; // parallel-lane / opposite-carriageway radars mapped this close are treated as one alert
 const U_TURN_HEADING_DELTA_DEG = 90; // heading swing past this = a genuine U-turn, not just a curve
+// Persisted, not just in-memory React state — the headless task can run
+// after a background relaunch where no React tree (and therefore no
+// isScanning state) exists yet at all. The task checks THIS on every
+// invocation as a belt-and-suspenders guard, independent of whether
+// stopLocationUpdatesAsync already "should" have stopped things.
+const SCANNING_STORAGE_KEY = '@radar_map/is_scanning_v1';
 
 export const RADAR_LOCATION_TASK = 'radar-background-location-task';
 
@@ -370,6 +376,15 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const { locations } = (data as { locations: Location.LocationObject[] }) || { locations: [] };
   const loc = locations?.[locations.length - 1];
   if (!loc) return;
+
+  // Belt-and-suspenders: stopLocationUpdatesAsync should already have
+  // unregistered this task the moment scanning stopped, but if that didn't
+  // fully complete (app killed mid-teardown) or this is a background
+  // relaunch with no in-memory isScanning yet, this persisted flag is the
+  // only thing that can still catch it — checked before any distance math
+  // or alert playback.
+  const scanningRaw = await AsyncStorage.getItem(SCANNING_STORAGE_KEY);
+  if (scanningRaw !== 'true') return;
 
   // Feed any mounted screen (map/speedometer) with this same fix.
   uiListeners.forEach((cb) => cb(loc));
@@ -696,6 +711,11 @@ function useRadarEngine() {
         distanceInterval: LOCATION_DISTANCE_INTERVAL_M,
         activityType: Location.ActivityType.AutomotiveNavigation,
         showsBackgroundLocationIndicator: true, // iOS: blue status-bar pill while tracking in bg
+        // Defaults to true on iOS (CoreLocation's own default) — CLLocationManager decides on
+        // its own that the user has "stopped moving" and pauses delivery, which is exactly the
+        // kind of OS judgment call that leads to suspension on screen lock. Explicit false,
+        // same as Waze/Google Maps do for continuous nav tracking.
+        pausesUpdatesAutomatically: false,
         foregroundService: {
           // Android: mandatory - this is the persistent notification that
           // keeps the OS from killing the process while backgrounded.
@@ -724,13 +744,20 @@ function useRadarEngine() {
     };
   }, [isScanning]);
 
-  const startScanning = useCallback(() => setIsScanning(true), []);
+  const startScanning = useCallback(() => {
+    setIsScanning(true);
+    // Written before the permission-check effect even starts — the
+    // headless task's own guard reads this independently of React state, so
+    // it must be persisted as early as the user's intent is known.
+    AsyncStorage.setItem(SCANNING_STORAGE_KEY, 'true').catch(() => {});
+  }, []);
   // إيقاف صريح ومنتظر (awaited) — مش مجرد قلب الفلاج والانتظار إن الـ effect
   // cleanup يتصرف في وقته. ده اللي بيخلي الدايرة الزرقاء في iOS تختفي فورًا
   // لما المستخدم يدوس "إيقاف المسح"، بدل ما تفضل معلقة لحد ما React يشغّل
   // الـ cleanup.
   const stopScanning = useCallback(async () => {
     setIsScanning(false);
+    await AsyncStorage.setItem(SCANNING_STORAGE_KEY, 'false').catch(() => {});
     await stopAndRestoreCurrentSound(); // guarantees ducking recovers even if Stop is pressed mid-alert
     try {
       const stillRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);

@@ -1,5 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Camera, Map, UserLocation, ViewAnnotation } from '@maplibre/maplibre-react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -26,6 +27,8 @@ import {
   saveUserPoi
 } from '../services/radarService';
 import { COLORS, useLang } from './_layout';
+
+const MAP_STYLE_STORAGE_KEY = '@radar_map/map_style_v1';
 
 // إعدادات خريطة القمر الصناعي المجانية (Esri World Imagery)
 const satelliteStyle = JSON.stringify({
@@ -98,6 +101,8 @@ export default function RadarScreen() {
   // handleMapPress this armed tap is placing a NEW POI of this type, not
   // picking a search location (the other thing pinPickMode is reused for).
   const [pendingPoiType, setPendingPoiType] = useState<RadarPoiType | null>(null);
+  // Which marker's info card is currently expanded (tap to toggle).
+  const [selectedPoiId, setSelectedPoiId] = useState<string | null>(null);
   const mapRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
   // 'standard' (vector tiles) uses far less GPU/battery than satellite
@@ -106,6 +111,12 @@ export default function RadarScreen() {
   // system theme.
   const [mapType, setMapType] = useState<'standard' | 'dark' | 'satellite'>('standard');
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
+
+  useEffect(() => {
+    AsyncStorage.getItem(MAP_STYLE_STORAGE_KEY).then((saved) => {
+      if (saved === 'standard' || saved === 'dark' || saved === 'satellite') setMapType(saved);
+    });
+  }, []);
 
   const mapStyleURL = useMemo(() => {
     if (mapType === 'dark') return 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
@@ -378,6 +389,7 @@ export default function RadarScreen() {
   const selectMapType = useCallback((type: 'standard' | 'dark' | 'satellite') => {
     setMapType(type);
     setStyleMenuOpen(false);
+    AsyncStorage.setItem(MAP_STYLE_STORAGE_KEY, type).catch(() => {});
   }, []);
 
   const poiLabel = useCallback(
@@ -414,14 +426,34 @@ export default function RadarScreen() {
         <ViewAnnotation
           key={poi.id}
           lngLat={[poi.longitude, poi.latitude]}
-          onSelect={() => handleDeletePoi(poi)}
+          onSelect={() => setSelectedPoiId((prev) => (prev === poi.id ? null : poi.id))}
         >
-          <View>
+          <View style={styles.markerWrap}>
+            {selectedPoiId === poi.id && (
+              <View style={styles.calloutBubble}>
+                <Text style={styles.calloutText} numberOfLines={2}>
+                  {poiLabel(poi)}
+                </Text>
+                {/* Core/database radars have source !== 'user' — no trash
+                    button renders for them at all, not just a disabled one. */}
+                {poi.source === 'user' && (
+                  <Pressable
+                    style={styles.calloutDeleteButton}
+                    onPress={() => {
+                      setSelectedPoiId(null);
+                      handleDeletePoi(poi);
+                    }}
+                  >
+                    <Ionicons name="trash" size={16} color="#FFFFFF" />
+                  </Pressable>
+                )}
+              </View>
+            )}
             <Image source={POI_ICON_IMAGES[poi.type]} style={styles.poiMarkerImage} resizeMode="contain" />
           </View>
         </ViewAnnotation>
       )),
-    [displayedPois, poiLabel, handleDeletePoi]
+    [displayedPois, poiLabel, handleDeletePoi, selectedPoiId]
   );
 
   return (
@@ -814,6 +846,28 @@ const styles = StyleSheet.create({
   modalOptionText: { color: '#FFFFFF', fontSize: 14, fontWeight: '600', marginLeft: 10 },
   modalOptionIcon: { width: 22, height: 22 },
   poiMarkerImage: { width: 32, height: 32 },
+  markerWrap: { alignItems: 'center' },
+  calloutBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.tabBarBg,
+    borderColor: COLORS.tabBarBorder,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginBottom: 6,
+    maxWidth: 200,
+  },
+  calloutText: { color: '#FFFFFF', fontSize: 12, flexShrink: 1, marginRight: 8 },
+  calloutDeleteButton: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FF3B30',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   modalCancel: { alignItems: 'center', paddingVertical: 10, marginTop: 4 },
   modalCancelText: { color: COLORS.inactive, fontSize: 13 },
   commentInput: {
