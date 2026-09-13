@@ -54,6 +54,15 @@
       "expo-router",
       "@maplibre/maplibre-react-native",
       [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "1.9.25",
+            "minSdkVersion": 24
+          }
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
@@ -89,8 +98,7 @@
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
         }
-      ],
-      "expo-build-properties"
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
