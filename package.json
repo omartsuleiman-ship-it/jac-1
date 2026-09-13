@@ -20,6 +20,7 @@
     "@react-navigation/native": "^7.1.8",
     "babel-plugin-inline-dotenv": "^1.7.0",
     "expo": "~54.0.37",
+    "expo-audio": "~1.1.1",
     "expo-av": "~16.0.8",
     "expo-background-fetch": "~14.0.9",
     "expo-build-properties": "~1.0.10",
