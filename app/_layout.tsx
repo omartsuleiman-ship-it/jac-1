@@ -1,5 +1,5 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
 import { Stack, useRouter } from 'expo-router'; // 👈 ضفنا الـ useRouter هنا
 import { StatusBar } from 'expo-status-bar';
@@ -7,8 +7,18 @@ import { useEffect } from 'react';
 import { InteractionManager } from 'react-native';
 import 'react-native-reanimated';
 
+// 👇 ضفنا مكتبة سينتري هنا
+import * as Sentry from '@sentry/react-native';
+
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { RADAR_LOCATION_TASK, SCANNING_STORAGE_KEY, shouldSkipBootScanReset } from './tasks/radarTaskConstants';
+
+// 👇 ضفنا كود تهيئة سينتري هنا قبل أي شغل تاني في التطبيق
+Sentry.init({
+  dsn: 'https://ed09c627d733300e5c3664b3b5a3631d@o4512085217968128.ingest.us.sentry.io/4512085378596864', // ⚠️ لازم تحط اللينك بتاع مشروعك من Sentry هنا
+  debug: true,
+  enableNative: false, // ضفنا دي عشان لو Sideloadly بيعلق مع الجزء الـ Native بتاع Sentry
+});
 
 export const unstable_settings = {
   anchor: '(tabs)',
