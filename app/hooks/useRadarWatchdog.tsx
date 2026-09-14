@@ -142,6 +142,47 @@ const passedRadarLedger: Record<string, number> = {};
 // nothing async can race it.
 let alertPlaybackInFlight = false;
 
+// ── Invocation rate floor (fixes the startup CPU-saturation crash) ──
+// distanceInterval is only 1m, so ordinary GPS jitter can satisfy it far
+// more often than once a second — and if this task was still registered
+// from a previous session while the app was suspended, iOS delivers the
+// backlog of queued fixes back-to-back the instant the process resumes.
+// Nothing here was rate-limiting the actual HEAVY work per invocation, so
+// a burst of dozens of fixes arriving with no gap between them means
+// dozens of full AsyncStorage reads + POI rebuilds + candidate loops
+// running essentially synchronously back-to-back — exactly what a sustained
+// ~99% CPU reading over many seconds looks like. This floor is independent
+// of how fast the OS calls in; anything arriving faster than this is
+// rejected outright before any real work starts.
+const TASK_MIN_INTERVAL_MS = 900;
+let lastTaskRunAt = 0;
+
+// ── POI cache (fixes the other half of the same CPU issue) ── loadUserPois()
+// + getStaticPois() + rebuilding the combined array used to happen on EVERY
+// single invocation, unconditionally — a full storage read and array build
+// per GPS tick, forever. The UI side of this file already solved this exact
+// problem for itself (see allPoisRef in useRadarEngine below); the
+// background task never got the same treatment. TTL-cached here instead —
+// refreshed at most once a minute, or immediately after invalidatePoiCache()
+// is called (wired into refreshPois() below so a freshly-saved POI is
+// available to background alerting immediately, not just the map UI).
+const POI_CACHE_TTL_MS = 60000;
+let cachedAllPois: RadarPoi[] | null = null;
+let cachedAllPoisAt = 0;
+
+const getCachedAllPois = async (): Promise<RadarPoi[]> => {
+  const now = Date.now();
+  if (cachedAllPois && now - cachedAllPoisAt < POI_CACHE_TTL_MS) return cachedAllPois;
+  const userPois = await loadUserPois();
+  cachedAllPois = [...getStaticPois(), ...userPois];
+  cachedAllPoisAt = now;
+  return cachedAllPois;
+};
+
+export const invalidatePoiCache = () => {
+  cachedAllPois = null;
+};
+
 const toRadLocal = (deg: number) => (deg * Math.PI) / 180;
 
 // ── Along-track / cross-track corridor (Edge Case 2: overpass / crossing
@@ -346,6 +387,13 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const loc = locations?.[locations.length - 1];
   if (!loc) return;
 
+  // Hard floor, checked before ANYTHING else — even before the scanning
+  // flag or idle check below. This is what actually stops a burst/backlog
+  // delivery from running the full heavy pipeline dozens of times back-to-back.
+  const nowMs = Date.now();
+  if (nowMs - lastTaskRunAt < TASK_MIN_INTERVAL_MS) return;
+  lastTaskRunAt = nowMs;
+
   // Belt-and-suspenders: stopLocationUpdatesAsync should already have
   // unregistered this task the moment scanning stopped, but if that didn't
   // fully complete (app killed mid-teardown) or this is a background
@@ -388,8 +436,7 @@ TaskManager.defineTask(RADAR_LOCATION_TASK, async ({ data, error }) => {
   const smartAlertsEnabled = smartAlertsRaw === 'true';
   const isAr = langRaw !== 'en'; // _layout.tsx also defaults to 'ar' when nothing is saved yet
 
-  const userPois = await loadUserPois();
-  const allPois = [...getStaticPois(), ...userPois];
+  const allPois = await getCachedAllPois();
 
   // Bounding box FIRST — Haversine/bearing only ever run over what's left.
   const candidates = boundingBoxFilter(allPois, latitude, longitude, BOUNDING_BOX_KM);
@@ -535,7 +582,26 @@ function useRadarEngine() {
   // ومنطق التنبيه ميستخدموش location.coords.speed تاني خالص.
   const [speedKmh, setSpeedKmh] = useState(0);
 
+  // Cold-boot reset: isScanning already defaults to false in React state
+  // above, but SCANNING_STORAGE_KEY is what the HEADLESS background task
+  // actually checks (it has no React tree to read state from) — and that
+  // persisted value survives a force-quit. Without this, swiping the app
+  // away while scanning leaves 'true' on disk, so the very next cold boot
+  // lets the background task keep treating itself as active even though
+  // the UI correctly shows "not scanning". Runs once, unconditionally, on
+  // every fresh mount — a force-quit is exactly the case where you WANT to
+  // stop trusting whatever was persisted last time, not honor it.
+  useEffect(() => {
+    AsyncStorage.setItem(SCANNING_STORAGE_KEY, 'false').catch(() => {});
+    Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK)
+      .then((running) => {
+        if (running) return Location.stopLocationUpdatesAsync(RADAR_LOCATION_TASK);
+      })
+      .catch(() => {}); // no ghost task existed, or it was already gone — both fine
+  }, []);
+
   const refreshPois = useCallback(async (center?: { latitude: number; longitude: number }) => {
+    invalidatePoiCache(); // a newly-saved POI must reach background alerting too, not just this screen
     const userPois = await loadUserPois();
     allPoisRef.current = [...getStaticPois(), ...userPois];
     const fetchCenter = center ?? lastLocationRef.current;
