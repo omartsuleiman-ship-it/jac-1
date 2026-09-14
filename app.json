@@ -107,7 +107,8 @@
           "organization": "omar-u0",
           "autoUploadDebugSymbolFiles": false
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true,
