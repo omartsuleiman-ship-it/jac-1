@@ -73,6 +73,8 @@ jobs:
       - name: Build unsigned .app (device architecture, no signing)
         id: build
         working-directory: ios
+        env:
+          SENTRY_DISABLE_AUTO_UPLOAD: true
         run: |
           set -o pipefail
           xcodebuild \
