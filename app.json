@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.omartamer.jac",
+      "bundleIdentifier": "com.omartamer.jac.v2",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSBluetoothAlwaysUsageDescription": "This app connects to your ARC 103 diagnostic device via Bluetooth.",
@@ -44,7 +44,7 @@
         "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
-      "package": "com.anonymous.jac"
+      "package": "com.omartamer.jac.v2"
     },
     "web": {
       "output": "static",
@@ -94,7 +94,7 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to save your car's parked location and alert you about nearby speed cameras, even in the background.",
+          "locationAlwaysAndWhenInUseUsageDescription": "Allow $(PRODUCT_NAME) to save your car's parked location and alert you about nearby speed cameras, even in the background.",
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
         }
