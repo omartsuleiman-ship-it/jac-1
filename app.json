@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "jac",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.omartamer.jac.v2",
@@ -31,8 +30,6 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
@@ -53,7 +50,6 @@
     "plugins": [
       "expo-router",
       "expo-audio",
-      "@maplibre/maplibre-react-native",
       [
         "expo-build-properties",
         {
@@ -99,11 +95,18 @@
           "isAndroidForegroundServiceEnabled": true
         }
       ],
-      "@sentry/react-native"
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "react-native",
+          "organization": "omar-u0",
+          "autoUploadDebugSymbolFiles": false
+        }
+      ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "router": {},
