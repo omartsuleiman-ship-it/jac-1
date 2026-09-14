@@ -4,19 +4,6 @@ import * as Notifications from 'expo-notifications';
 import { Tabs } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
-import { RadarProvider } from '../hooks/useRadarWatchdog';
-import { LiveDataKey, SafetyDataKey } from '../services/bleService';
-
-// The watchdog always monitors this fixed critical set, independent of
-// whatever the user has chosen to display on the diagnostics dashboard —
-// background danger alerting and the customizable live-data view are
-// separate concerns.
-// ABS and TPMS were dropped from the watchdog: raw terminal testing showed
-// this ELM327 can only reach the Engine (7E0) and Transmission (7E1) ECUs —
-// polling 7B0 (ABS) / 7A0 (TPMS) only produced NO DATA / timeouts.
-const WATCHDOG_LIVE_KEYS: LiveDataKey[] = ['coolant', 'voltage'];
-const WATCHDOG_SAFETY_KEYS: SafetyDataKey[] = [];
-
 // ضبط إعدادات الإشعارات للتوافق مع الإصدارات الحديثة
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -41,7 +28,14 @@ export const COLORS = {
 
 const STORAGE_KEY = 'app_language';
 
+// #region agent log
+fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'A',location:'app/(tabs)/_layout.tsx:module',message:'tabs layout module evaluated (no RadarProvider, no bleService)',data:{},timestamp:Date.now()})}).catch(()=>{});
+// #endregion
+
 export default function TabLayout() {
+  // #region agent log
+  fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'boot',hypothesisId:'A',location:'app/(tabs)/_layout.tsx:TabLayout',message:'tabs layout render',data:{},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   const [lang, setLang] = useState<'en' | 'ar'>('ar');
 
   // Load saved language on mount
@@ -73,7 +67,6 @@ export default function TabLayout() {
 
  return (
     <LangContext.Provider value={{ lang, toggleLanguage, isAr }}>
-      <RadarProvider>
         <GlobalSafetyWatchdog />
         <Tabs
           // This Expo Router version's <Tabs> doesn't expose
@@ -178,7 +171,6 @@ export default function TabLayout() {
             }}
           />
         </Tabs>
-      </RadarProvider>
     </LangContext.Provider>
   );
 }

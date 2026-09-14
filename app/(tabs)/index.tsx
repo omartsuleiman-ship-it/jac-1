@@ -15,7 +15,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { STORAGE_KEY_LAST_PARKED } from '../services/bleService';
+import { STORAGE_KEY_LAST_PARKED } from '../services/storageKeys';
 import { useLang } from './_layout';
 
 const COLORS = {

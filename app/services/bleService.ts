@@ -3,6 +3,8 @@ import * as Location from 'expo-location';
 import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 import { setObdSpeedKmh } from './obdSpeedStore';
+export { STORAGE_KEY_LAST_PARKED } from './storageKeys';
+import { STORAGE_KEY_LAST_PARKED } from './storageKeys';
 
 // ── BLE Manager ──
 // restoreStateIdentifier is what actually lets iOS relaunch/reattach this app
@@ -11,22 +13,29 @@ import { setObdSpeedKmh } from './obdSpeedStore';
 // mechanism the bluetooth-central mode is meant to pair with.
 const BLE_RESTORE_STATE_ID = 'jac-obd-central-manager';
 
-export const bleManager = new BleManager({
-  restoreStateIdentifier: BLE_RESTORE_STATE_ID,
-  restoreStateFunction: (restoredState) => {
-    if (restoredState && restoredState.connectedPeripherals.length > 0) {
-      const restoredDevice = restoredState.connectedPeripherals[0];
-      console.log('[BLE] iOS restored connection to:', restoredDevice.id);
-      // Re-attach write/notify characteristics + command queue to the
-      // restored device so it's usable the moment the app is foregrounded
-      setOBDDevice(restoredDevice).catch((error) => {
-        console.warn('[BLE] Failed to re-attach after state restoration:', error);
-      });
-    } else {
-      console.log('[BLE] iOS restore callback fired with no connected peripheral');
-    }
-  },
-});
+let bleManager: BleManager | null = null;
+
+const getBleManager = (): BleManager => {
+  if (bleManager) return bleManager;
+  bleManager = new BleManager({
+    restoreStateIdentifier: BLE_RESTORE_STATE_ID,
+    restoreStateFunction: (restoredState) => {
+      // #region agent log
+      fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'B',location:'bleService.ts:restoreStateFunction',message:'BLE restore callback',data:{peripheralCount:restoredState?.connectedPeripherals?.length??0},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      if (restoredState && restoredState.connectedPeripherals.length > 0) {
+        const restoredDevice = restoredState.connectedPeripherals[0];
+        console.log('[BLE] iOS restored connection to:', restoredDevice.id);
+        setOBDDevice(restoredDevice).catch((error) => {
+          console.warn('[BLE] Failed to re-attach after state restoration:', error);
+        });
+      } else {
+        console.log('[BLE] iOS restore callback fired with no connected peripheral');
+      }
+    },
+  });
+  return bleManager;
+};
 
 // ── OBD-II Service & Characteristic UUIDs ──
 const OBD_SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
@@ -34,9 +43,6 @@ const OBD_CHARACTERISTIC_UUID = '0000ffe1-0000-1000-8000-00805f9b34fb';
 
 // ── Must match STORAGE_KEY_ODOMETER in maintenance.tsx / trip.tsx exactly ──
 const STORAGE_KEY_ODOMETER = '@car_app/current_odometer_v1';
-
-// ── Exported so index.tsx reads the exact same key, never a hardcoded literal ──
-export const STORAGE_KEY_LAST_PARKED = '@last_parked_location';
 
 // ── Pure-JS ASCII <-> Base64 helpers (RN has no global Buffer/Node polyfill) ──
 const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -395,12 +401,12 @@ export const startBleScan = (
   onDeviceFound: (device: Device) => void,
   onError: (error: any) => void
 ) => {
-  bleManager.state().then((state) => {
+  getBleManager().state().then((state) => {
     if (state !== 'PoweredOn') {
       onError(new Error('يرجى تشغيل البلوتوث أولاً من إعدادات الآيفون.'));
       return;
     }
-    bleManager.startDeviceScan(null, null, (error, device) => {
+    getBleManager().startDeviceScan(null, null, (error, device) => {
       if (error) {
         onError(error);
         return;
@@ -413,7 +419,7 @@ export const startBleScan = (
 };
 
 export const stopBleScan = () => {
-  bleManager.stopDeviceScan();
+  getBleManager().stopDeviceScan();
 };
 
 export const connectToBleDevice = async (device: Device): Promise<Device> => {
@@ -430,7 +436,7 @@ export const connectToBleDevice = async (device: Device): Promise<Device> => {
 
 export const disconnectBleDevice = async (deviceId: string) => {
   try {
-    await bleManager.cancelDeviceConnection(deviceId);
+    await getBleManager().cancelDeviceConnection(deviceId);
   } catch (error) {
     console.error('Error disconnecting:', error);
   } finally {
