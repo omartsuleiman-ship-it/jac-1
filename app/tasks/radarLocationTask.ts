@@ -223,8 +223,32 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
       activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
       alertMemoryDirty = true;
       try {
-        const { playRadarSound } = await import('./playRadarSound');
-        await playRadarSound(poi, isAr);
+        const lang = isAr ? 'ar' : 'en';
+        const SUPPORTED = [40, 50, 60, 70, 80, 90, 100, 120];
+        const maxspeed = poi.maxspeed as number;
+        const speed = maxspeed && SUPPORTED.includes(maxspeed) ? maxspeed : null;
+        const sound = speed ? `radar_${speed}_${lang}.wav` : `radar_general_${lang}.wav`;
+        
+        const label = speed 
+          ? (lang === 'ar' ? `رادار ${speed} كم/س` : `Speed Camera ${speed} km/h`) 
+          : (lang === 'ar' ? 'رادار أمامك' : 'Speed Camera Ahead');
+
+        const Notifications = await import('expo-notifications');
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: label,
+            body: null,
+            sound: sound,
+            priority: Notifications.AndroidNotificationPriority.MAX,
+            vibrate: [0], // عشان ميفضلش يتهز ويزعجك
+          },
+          trigger: null,
+        });
+        
+        // تأخير 4 ثواني عشان ندي فرصة لملف الصوت يخلص قبل ما يسمح بإشعار جديد لنفس الرادار
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+      } catch (err) {
+        console.warn('[Radar] failed to trigger notification:', err);
       } finally {
         alertPlaybackInFlight = false;
       }
