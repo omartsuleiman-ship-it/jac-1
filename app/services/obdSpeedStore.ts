@@ -7,9 +7,16 @@ type ObdSpeedListener = (kmh: number) => void;
 let currentSpeedKmh = 0;
 const listeners = new Set<ObdSpeedListener>();
 
+// Dashboard calibration offset: OBD speed is true ground speed; the
+// physical dashboard intentionally reads ~5% higher per safety regulations.
+// Applying the same offset here makes every display in the app (speedometer,
+// radar alert threshold, DTE) consistent with what the driver sees on the
+// dashboard instrument cluster.
+const DASHBOARD_OFFSET_FACTOR = 1.05;
+
 export const setObdSpeedKmh = (kmh: number) => {
-  currentSpeedKmh = kmh;
-  listeners.forEach((cb) => cb(kmh));
+  currentSpeedKmh = kmh * DASHBOARD_OFFSET_FACTOR;
+  listeners.forEach((cb) => cb(currentSpeedKmh));
 };
 
 export const getObdSpeedKmh = (): number => currentSpeedKmh;
