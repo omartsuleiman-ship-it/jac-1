@@ -124,11 +124,6 @@ const saveLastAlertMemory = async (memory: LastAlertMemory | null) => {
   }
 };
 
-export const stopAndRestoreCurrentSound = async () => {
-  const { stopAndRestoreCurrentSound: stop } = await import('./playRadarSound');
-  await stop();
-};
-
 const shouldTriggerAlert = (poi: RadarPoi, speedKmh: number, smartAlertsEnabled: boolean): boolean => {
   if (!smartAlertsEnabled) return true;
   const hasLimit = poi.maxspeed !== null && poi.maxspeed !== undefined;
