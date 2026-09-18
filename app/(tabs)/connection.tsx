@@ -49,6 +49,8 @@ export default function ConnectionScreen() {
     setScanning(true);
     setDevices([]);
 
+    const initGuardTimer = setTimeout(() => setScanning(false), 2000);
+
     startBleScan(
       (newDevice) => {
         // إضافة الجهاز للقائمة لو مش موجود قبل كده
@@ -59,6 +61,7 @@ export default function ConnectionScreen() {
         });
       },
       (error) => {
+        clearTimeout(initGuardTimer);
         setScanning(false);
         Alert.alert('خطأ في البلوتوث', error.message || 'حدث خطأ أثناء البحث عن الأجهزة.');
       }
