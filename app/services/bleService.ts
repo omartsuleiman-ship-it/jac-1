@@ -3,8 +3,8 @@ import * as Location from 'expo-location';
 import { Alert } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
 import { setObdSpeedKmh } from './obdSpeedStore';
-export { STORAGE_KEY_LAST_PARKED } from './storageKeys';
 import { STORAGE_KEY_LAST_PARKED } from './storageKeys';
+export { STORAGE_KEY_LAST_PARKED } from './storageKeys';
 
 // ── BLE Manager ──
 // restoreStateIdentifier is what actually lets iOS relaunch/reattach this app
@@ -399,13 +399,21 @@ export const setOBDDevice = async (device: Device) => {
 // ── Scan functions ──
 export const startBleScan = (
   onDeviceFound: (device: Device) => void,
-  onError: (error: any) => void
+  onError: (error: any) => void,
+  retryCount = 0 // ضفنا عداد للمحاولات
 ) => {
   getBleManager().state().then((state) => {
+    // لو البلوتوث لسه بيصحى، اصبر نص ثانية وجرب تاني (بحد أقصى 3 مرات)
+    if ((state === 'Unknown' || state === 'Resetting') && retryCount < 3) {
+      setTimeout(() => startBleScan(onDeviceFound, onError, retryCount + 1), 500);
+      return;
+    }
+
     if (state !== 'PoweredOn') {
       onError(new Error('يرجى تشغيل البلوتوث أولاً من إعدادات الآيفون.'));
       return;
     }
+
     getBleManager().startDeviceScan(null, null, (error, device) => {
       if (error) {
         onError(error);
