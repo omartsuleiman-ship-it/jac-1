@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
 import type { TaskManagerTaskBody } from 'expo-task-manager';
 import { getObdSpeedKmh } from '../services/obdSpeedStore';
 import {
@@ -228,14 +229,12 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
           ? (lang === 'ar' ? `رادار ${speed} كم/س` : `Speed Camera ${speed} km/h`) 
           : (lang === 'ar' ? 'رادار أمامك' : 'Speed Camera Ahead');
 
-        const Notifications = await import('expo-notifications');
         await Notifications.scheduleNotificationAsync({
           content: {
             title: label,
-            body: null,
+            body: ' ',
             sound: sound,
             priority: Notifications.AndroidNotificationPriority.MAX,
-            vibrate: [0], // عشان ميفضلش يتهز ويزعجك
           },
           trigger: null,
         });

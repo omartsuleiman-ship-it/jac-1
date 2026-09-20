@@ -57,13 +57,16 @@ export default function RootLayout() {
   // Set notification handler with sound enabled (Sound Only for Radar Alerts)
   useEffect(() => {
     Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: false, // لا تظهر إشعار مرئي (Banner) يغطي الشاشة أثناء القيادة
-        shouldShowBanner: false, // تأكيد إخفاء البانر في بعض النسخ
-        shouldShowList: false, // لا تحفظ الإشعار في القائمة المنسدلة
-        shouldPlaySound: true,   // ✅ مطلوب لتشغيل صوت التحذير
-        shouldSetBadge: false,
-      }),
+      handleNotification: async (notification) => {
+        const isRadar = notification.request.content.categoryIdentifier === 'RADAR_ALERT';
+        return {
+          shouldShowAlert: !isRadar,
+          shouldShowBanner: !isRadar,
+          shouldShowList: !isRadar,
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+        };
+      },
     });
 
     // Request permissions with sound (required for iOS)
