@@ -39,14 +39,6 @@ const COLORS = {
   overlay: 'rgba(0,0,0,0.6)',
 };
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
 
 type MaintenanceUnit = 'km' | 'months';
 
@@ -245,6 +237,7 @@ export default function MaintenanceScreen() {
             : 'Time to manually update your odometer reading to keep maintenance schedules accurate.',
           data: { action: 'update_odometer' },
           sound: 'default',
+          priority: Notifications.AndroidNotificationPriority.HIGH,
         },
         trigger: {
           type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,

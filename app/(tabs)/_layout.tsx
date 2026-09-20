@@ -4,15 +4,6 @@ import * as Notifications from 'expo-notifications';
 import { Tabs } from 'expo-router';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
-// ضبط إعدادات الإشعارات للتوافق مع الإصدارات الحديثة
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
 // ── 1. Global Language Context ──
 type LangContextType = { lang: 'en' | 'ar'; toggleLanguage: () => void; isAr: boolean };
 const LangContext = createContext<LangContextType>({ lang: 'ar', toggleLanguage: () => {}, isAr: true });
@@ -188,7 +179,7 @@ function GlobalSafetyWatchdog() {
     await Notifications.scheduleNotificationAsync({
       content: {
         title,
-        body,
+        body: body || ' ',
         sound: tone === 'danger' ? 'default' : 'default',
       },
       trigger: null,

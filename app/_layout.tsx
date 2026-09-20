@@ -20,6 +20,25 @@ Sentry.init({
   enableNative: false, // ضفنا دي عشان لو Sideloadly بيعلق مع الجزء الـ Native بتاع Sentry
 });
 
+// 🔔 Global Notification Handler - MUST be top-level for cold launch reliability
+Notifications.setNotificationHandler({
+  handleNotification: async (notification) => {
+    // We check category or sound name to identify radar alerts
+    // Radar alerts should NOT show a banner (sound only), others should.
+    const content = notification.request.content;
+    const isRadar = content.categoryIdentifier === 'RADAR_ALERT' || 
+                   (typeof content.sound === 'string' && content.sound.startsWith('radar_'));
+    
+    return {
+      shouldShowAlert: !isRadar,
+      shouldShowBanner: !isRadar,
+      shouldShowList: !isRadar,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    };
+  },
+});
+
 export const unstable_settings = {
   anchor: '(tabs)',
 };
@@ -54,33 +73,35 @@ export default function RootLayout() {
     return () => handle.cancel();
   }, []);
 
-  // Set notification handler with sound enabled (Sound Only for Radar Alerts)
+  // Unified effect for permissions and notification listeners
   useEffect(() => {
-    Notifications.setNotificationHandler({
-      handleNotification: async (notification) => {
-        const isRadar = notification.request.content.categoryIdentifier === 'RADAR_ALERT';
-        return {
-          shouldShowAlert: !isRadar,
-          shouldShowBanner: !isRadar,
-          shouldShowList: !isRadar,
-          shouldPlaySound: true,
-          shouldSetBadge: false,
-        };
-      },
-    });
-
     // Request permissions with sound (required for iOS)
     const requestPermissions = async () => {
-      const { status } = await Notifications.requestPermissionsAsync({
-        ios: {
-          allowSound: true,
-          allowAlert: true,
-          allowBadge: true,
-        },
-      });
+      // 1. Check current foreground permissions
+      const settings = await Notifications.getPermissionsAsync();
+      let status = settings.status;
+
+      // 2. If not granted, request them
+      if (status !== 'granted') {
+        const result = await Notifications.requestPermissionsAsync({
+          ios: {
+            allowSound: true,
+            allowAlert: true,
+            allowBadge: true,
+            allowCriticalAlerts: true,
+          },
+        });
+        status = result.status;
+      }
+
       if (status !== 'granted') {
         console.warn('Notification permissions not granted');
+        return;
       }
+
+      // 3. For background alerts (Radar) on iOS, we ideally need Location 'Always'
+      // which is handled by expo-location elsewhere, but for notifications specifically
+      // we've now ensured Alerts and Sounds are enabled.
     };
     requestPermissions();
 
