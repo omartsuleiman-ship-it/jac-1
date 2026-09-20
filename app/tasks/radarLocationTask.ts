@@ -62,7 +62,8 @@ export const updateIdleTracking = (speedKmh: number): boolean => {
 export const isRadarIdle = () => radarIsIdle;
 
 const passedRadarLedger: Record<string, number> = {};
-let alertPlaybackInFlight = false;
+let handlerBusy = false;
+let alertCooldownUntil = 0;
 let lastTaskRunAt = 0;
 let cachedAllPois: RadarPoi[] | null = null;
 let cachedAllPoisAt = 0;
@@ -134,99 +135,103 @@ const shouldTriggerAlert = (poi: RadarPoi, speedKmh: number, smartAlertsEnabled:
 export const stopRadarBackgroundTracking = () => Location.stopLocationUpdatesAsync(RADAR_LOCATION_TASK);
 
 export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBody) => {
-  // #region agent log
-  fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'D',location:'radarLocationTask.ts:handle',message:'heavy handler entered',data:{hasError:!!error,locCount:((data as {locations?: unknown[]})?.locations?.length)??0},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-  if (error) {
-    console.warn('[Radar] background location task error:', error);
-    return;
-  }
-
-  const { locations } = (data as { locations: Location.LocationObject[] }) || { locations: [] };
-  const loc = locations?.[locations.length - 1];
-  if (!loc) return;
+  if (error) { console.warn('[Radar] background location task error:', error); return; }
+  if (handlerBusy) return;
 
   const nowMs = Date.now();
   if (nowMs - lastTaskRunAt < TASK_MIN_INTERVAL_MS) return;
   lastTaskRunAt = nowMs;
 
-  const scanningRaw = await AsyncStorage.getItem(SCANNING_STORAGE_KEY);
-  if (scanningRaw !== 'true') return;
+  handlerBusy = true;
 
-  uiListeners.forEach((cb) => cb(loc));
+  try {
+    const { locations } = (data as { locations: Location.LocationObject[] }) || { locations: [] };
+    const loc = locations?.[locations.length - 1];
+    if (!loc) return;
 
-  const { latitude, longitude, heading } = loc.coords;
-  const speedKmh = getObdSpeedKmh();
+    const scanningRaw = await AsyncStorage.getItem(SCANNING_STORAGE_KEY);
+    if (scanningRaw !== 'true') return;
 
-  if (updateIdleTracking(speedKmh)) return;
-  if (alertPlaybackInFlight) return;
+    uiListeners.forEach((cb) => cb(loc));
 
-  const [smartAlertsRaw, langRaw] = await Promise.all([
-    AsyncStorage.getItem(SMART_ALERTS_STORAGE_KEY),
-    AsyncStorage.getItem(LANGUAGE_STORAGE_KEY),
-  ]);
-  const smartAlertsEnabled = smartAlertsRaw === 'true';
-  const isAr = langRaw !== 'en';
+    const { latitude, longitude, heading } = loc.coords;
 
-  const allPois = await getCachedAllPois();
-  const candidates = boundingBoxFilter(allPois, latitude, longitude, BOUNDING_BOX_KM);
-  if (candidates.length === 0) return;
-
-  let activeAlert = await loadLastAlertMemory();
-  let alertMemoryDirty = false;
-
-  for (const poi of candidates) {
-    if (poi.type !== 'radar') continue;
-    const distance = haversineMeters(latitude, longitude, poi.latitude, poi.longitude);
-
-    if (distance <= CLOSE_PASS_RADIUS_M) {
-      passedRadarLedger[poi.id] = Date.now();
+    // OBD Speed Fallback: if getObdSpeedKmh() returns 0 or is missing, fall back to GPS speed
+    let speedKmh = getObdSpeedKmh();
+    if (!speedKmh) {
+      speedKmh = Math.max(0, (loc.coords.speed ?? 0) * 3.6);
     }
 
-    if (distance > ALERT_RADIUS_M) continue;
+    if (updateIdleTracking(speedKmh)) return;
+    if (Date.now() < alertCooldownUntil) return;
 
-    const passedAt = passedRadarLedger[poi.id];
-    if (passedAt !== undefined && Date.now() - passedAt < PASSED_RADAR_COOLDOWN_MS) continue;
+    const [smartAlertsRaw, langRaw] = await Promise.all([
+      AsyncStorage.getItem(SMART_ALERTS_STORAGE_KEY),
+      AsyncStorage.getItem(LANGUAGE_STORAGE_KEY),
+    ]);
+    const smartAlertsEnabled = smartAlertsRaw === 'true';
+    const isAr = langRaw !== 'en';
 
-    if (heading === null || heading === undefined || heading < 0) continue;
-    const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
+    const allPois = await getCachedAllPois();
+    const candidates = boundingBoxFilter(allPois, latitude, longitude, BOUNDING_BOX_KM).sort(
+      (a, b) =>
+        haversineMeters(latitude, longitude, a.latitude, a.longitude) -
+        haversineMeters(latitude, longitude, b.latitude, b.longitude)
+    );
+    if (candidates.length === 0) return;
 
-    if (angularDiff(heading, bearing) > MAX_RELATIVE_BEARING_DEG) continue;
+    let activeAlert = await loadLastAlertMemory();
 
-    const { alongTrackM, crossTrackM } = projectAlongAndCrossTrack(distance, heading, bearing);
-    if (alongTrackM <= 0) continue;
-    if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) continue;
+    for (const poi of candidates) {
+      if (poi.type !== 'radar') continue;
+      const distance = haversineMeters(latitude, longitude, poi.latitude, poi.longitude);
 
-    if (activeAlert) {
-      const headingSwing = angularDiff(heading, activeAlert.heading);
-      const isUTurn = headingSwing > U_TURN_HEADING_DELTA_DEG;
-      if (isUTurn) {
-        activeAlert = null;
-      } else {
-        const distanceToActive = haversineMeters(
-          poi.latitude,
-          poi.longitude,
-          activeAlert.latitude,
-          activeAlert.longitude
-        );
-        const stillFresh = Date.now() - activeAlert.timestamp < ALERT_DEBOUNCE_MS;
-        if (distanceToActive <= TWIN_RADAR_RADIUS_M && stillFresh) continue;
+      if (distance <= CLOSE_PASS_RADIUS_M) {
+        passedRadarLedger[poi.id] = Date.now();
       }
-    }
 
-    if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
-      alertPlaybackInFlight = true;
-      activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
-      alertMemoryDirty = true;
-      try {
+      if (distance > ALERT_RADIUS_M) continue;
+
+      const passedAt = passedRadarLedger[poi.id];
+      if (passedAt !== undefined && Date.now() - passedAt < PASSED_RADAR_COOLDOWN_MS) continue;
+
+      if (heading === null || heading === undefined || heading < 0) continue;
+      const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
+
+      if (angularDiff(heading, bearing) > MAX_RELATIVE_BEARING_DEG) continue;
+
+      const { alongTrackM, crossTrackM } = projectAlongAndCrossTrack(distance, heading, bearing);
+      if (alongTrackM <= 0) continue;
+      if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) continue;
+
+      if (activeAlert) {
+        const headingSwing = angularDiff(heading, activeAlert.heading);
+        const isUTurn = headingSwing > U_TURN_HEADING_DELTA_DEG;
+        if (isUTurn) {
+          activeAlert = null;
+        } else {
+          const distanceToActive = haversineMeters(
+            poi.latitude,
+            poi.longitude,
+            activeAlert.latitude,
+            activeAlert.longitude
+          );
+          const stillFresh = Date.now() - activeAlert.timestamp < ALERT_DEBOUNCE_MS;
+          if (distanceToActive <= TWIN_RADAR_RADIUS_M && stillFresh) continue;
+        }
+      }
+
+      if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
+        activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
+
         const lang = isAr ? 'ar' : 'en';
         const SUPPORTED = [40, 50, 60, 70, 80, 90, 100, 120];
         const maxspeed = poi.maxspeed as number;
         const speed = maxspeed && SUPPORTED.includes(maxspeed) ? maxspeed : null;
         const sound = speed ? `radar_${speed}_${lang}.wav` : `radar_general_${lang}.wav`;
-        
-        const label = speed 
-          ? (lang === 'ar' ? `رادار ${speed} كم/س` : `Speed Camera ${speed} km/h`) 
+
+        const label = speed
+          ? (lang === 'ar' ? `رادار ${speed} كم/س` : `Speed Camera ${speed} km/h`)
           : (lang === 'ar' ? 'رادار أمامك' : 'Speed Camera Ahead');
 
         await Notifications.scheduleNotificationAsync({
@@ -238,16 +243,15 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
           },
           trigger: null,
         });
-        
-        // تأخير 4 ثواني عشان ندي فرصة لملف الصوت يخلص قبل ما يسمح بإشعار جديد لنفس الرادار
-        await new Promise((resolve) => setTimeout(resolve, 4000));
-      } catch (err) {
-        console.warn('[Radar] failed to trigger notification:', err);
-      } finally {
-        alertPlaybackInFlight = false;
+
+        alertCooldownUntil = Date.now() + 4000; // replaces the 4-second sleep
+        await saveLastAlertMemory(activeAlert);
+        break; // one alert per pass
       }
     }
+  } catch (err) {
+    console.error("Radar Task Error:", err);
+  } finally {
+    handlerBusy = false;
   }
-
-  if (alertMemoryDirty) await saveLastAlertMemory(activeAlert);
 };
