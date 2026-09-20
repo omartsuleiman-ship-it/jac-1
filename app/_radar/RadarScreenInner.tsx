@@ -16,6 +16,7 @@ import {
   TextInput,
   View
 } from 'react-native';
+import { COLORS, useLang } from '../(tabs)/_layout';
 import { useRadar } from '../hooks/useRadarWatchdog';
 import {
   RadarPoi,
@@ -26,7 +27,6 @@ import {
   loadUserPois,
   saveUserPoi
 } from '../services/radarService';
-import { COLORS, useLang } from '../(tabs)/_layout';
 
 const MAP_STYLE_STORAGE_KEY = '@radar_map/map_style_v1';
 
@@ -120,7 +120,7 @@ export function RadarScreenInner() {
 
   const mapStyleURL = useMemo(() => {
     if (mapType === 'dark') return 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
-    if (mapType === 'satellite') return satelliteStyle;
+    if (mapType === 'satellite') return 'https://api.maptiler.com/maps/hybrid/style.json?key=oyMLTPzFnXdyVYFlohiu';
     return 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
   }, [mapType]);
 
