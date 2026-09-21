@@ -42,15 +42,7 @@ Notifications.setNotificationHandler({
 export const unstable_settings = {
   anchor: '(tabs)',
 };
-
-// #region agent log
-fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'boot',hypothesisId:'A',location:'app/_layout.tsx:module',message:'root layout module evaluated',data:{},timestamp:Date.now()})}).catch(()=>{});
-// #endregion
-
 export default function RootLayout() {
-  // #region agent log
-  fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'boot',hypothesisId:'A',location:'app/_layout.tsx:RootLayout',message:'root layout render',data:{},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   const colorScheme = useColorScheme();
   const router = useRouter(); // 👈 تفعيل الراوتر
 
