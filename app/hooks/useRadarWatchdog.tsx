@@ -24,17 +24,14 @@ export {
   RADAR_LOCATION_TASK,
   SPEED_NOISE_GATE_KMH,
   stopAndRestoreCurrentSound,
-  stopRadarBackgroundTracking,
+  stopRadarBackgroundTracking
 } from '../tasks/radarLocationTask';
 
 const NEARBY_RADIUS_KM = 5;
 const POI_FETCH_RADIUS_KM = 10;
 const PREFETCH_TRIGGER_KM = POI_FETCH_RADIUS_KM * 0.7;
 
-// #region agent log
-let radarProviderRenderCount = 0;
-fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'A',location:'useRadarWatchdog.tsx:module',message:'watchdog React module evaluated (radar tab only)',data:{},timestamp:Date.now()})}).catch(()=>{});
-// #endregion
+
 
 interface RadarContextValue {
   location: Location.LocationObject | null;
@@ -88,10 +85,7 @@ function useRadarEngine() {
     let cancelled = false;
     const handle = InteractionManager.runAfterInteractions(() => {
       (async () => {
-        // #region agent log
-        fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'C',location:'useRadarWatchdog.tsx:refreshPoisEffect',message:'deferred refreshPois after interactions',data:{},timestamp:Date.now()})}).catch(()=>{});
-        const _t0 = Date.now();
-        // #endregion
+
         await refreshPois();
         try {
           const quick = await Location.getLastKnownPositionAsync({
@@ -99,9 +93,6 @@ function useRadarEngine() {
             requiredAccuracy: 5000,
           });
           if (cancelled || !quick) return;
-          // #region agent log
-          fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'C',location:'useRadarWatchdog.tsx:getLastKnownPosition',message:'getLastKnownPositionAsync resolved',data:{ms:Date.now()-_t0,hasFix:!!quick},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           setLocation(quick);
           lastLocationRef.current = { latitude: quick.coords.latitude, longitude: quick.coords.longitude };
           setNearbyPois(
@@ -230,12 +221,6 @@ function useRadarEngine() {
 }
 
 export function RadarProvider({ children }: { children: React.ReactNode }) {
-  // #region agent log
-  radarProviderRenderCount += 1;
-  if (radarProviderRenderCount <= 30 || radarProviderRenderCount % 25 === 0) {
-    fetch('http://127.0.0.1:7630/ingest/de13606f-ba56-41c9-af73-87b91ac29696',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'ab38e3'},body:JSON.stringify({sessionId:'ab38e3',runId:'post-fix',hypothesisId:'F',location:'useRadarWatchdog.tsx:RadarProvider',message:'RadarProvider render',data:{n:radarProviderRenderCount},timestamp:Date.now()})}).catch(()=>{});
-  }
-  // #endregion
   const [smartAlertsEnabled, setSmartAlertsEnabledState] = useState(false);
 
   useEffect(() => {

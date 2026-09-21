@@ -133,6 +133,10 @@ const shouldTriggerAlert = (poi: RadarPoi, speedKmh: number, smartAlertsEnabled:
 };
 
 export const stopRadarBackgroundTracking = () => Location.stopLocationUpdatesAsync(RADAR_LOCATION_TASK);
+export const stopAndRestoreCurrentSound = async (): Promise<void> => {
+  // Placeholder: expo-audio sound cleanup (if any) goes here.
+  // Currently a no-op — alertPlaybackInFlight is timestamp-based now.
+};
 
 export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBody) => {
   if (error) { console.warn('[Radar] background location task error:', error); return; }
