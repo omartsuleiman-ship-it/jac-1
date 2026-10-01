@@ -4,7 +4,7 @@ import * as Notifications from 'expo-notifications';
 import { Stack, useRouter } from 'expo-router'; // 👈 ضفنا الـ useRouter هنا
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
-import { InteractionManager } from 'react-native';
+import { AppState, InteractionManager } from 'react-native';
 import 'react-native-reanimated';
 
 // 👇 ضفنا مكتبة سينتري هنا
@@ -12,6 +12,9 @@ import * as Sentry from '@sentry/react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { RADAR_LOCATION_TASK, SCANNING_STORAGE_KEY, shouldSkipBootScanReset } from './tasks/radarTaskConstants';
+
+// Evaluated once at bundle load. iOS reports 'background' when it relaunched the app headlessly.
+const LAUNCHED_IN_BACKGROUND = AppState.currentState === 'background';
 
 // 👇 ضفنا كود تهيئة سينتري هنا قبل أي شغل تاني في التطبيق
 Sentry.init({
@@ -49,7 +52,9 @@ export default function RootLayout() {
   useEffect(() => {
     const handle = InteractionManager.runAfterInteractions(() => {
       void (async () => {
-        if (shouldSkipBootScanReset()) return;
+               if (shouldSkipBootScanReset()) return;
+        // Headless relaunch by iOS: do NOT wipe the scan flag or stop location updates.
+        if (LAUNCHED_IN_BACKGROUND) return;
         await AsyncStorage.setItem(SCANNING_STORAGE_KEY, 'false').catch(() => {});
         try {
           const Location = await import('expo-location');

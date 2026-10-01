@@ -12,6 +12,7 @@ import {
   haversineMeters,
   loadUserPois,
 } from '../services/radarService';
+import { logBreadcrumb } from './radarBreadcrumbs';
 import {
   ALERT_MEMORY_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -20,7 +21,6 @@ import {
   SMART_ALERTS_STORAGE_KEY,
   SPEED_NOISE_GATE_KMH,
 } from './radarTaskConstants';
-
 export { LOCATION_DISTANCE_INTERVAL_M, LOCATION_TIME_INTERVAL_MS, RADAR_LOCATION_TASK, SCANNING_STORAGE_KEY, SMART_ALERTS_STORAGE_KEY, SPEED_NOISE_GATE_KMH } from './radarTaskConstants';
 
 const BOUNDING_BOX_KM = 2;
@@ -139,7 +139,12 @@ export const stopAndRestoreCurrentSound = async (): Promise<void> => {
 };
 
 export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBody) => {
-  if (error) { console.warn('[Radar] background location task error:', error); return; }
+  if (error) {
+    console.warn('[Radar] background location task error:', error);
+    logBreadcrumb('TASK_ERROR', String(error));
+    return;
+  }
+  logBreadcrumb('TASK_INVOKED');
   if (handlerBusy) return;
 
   const nowMs = Date.now();
@@ -151,10 +156,16 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
   try {
     const { locations } = (data as { locations: Location.LocationObject[] }) || { locations: [] };
     const loc = locations?.[locations.length - 1];
-    if (!loc) return;
+    if (!loc) {
+      logBreadcrumb('NO_LOCATION');
+      return;
+    }
 
     const scanningRaw = await AsyncStorage.getItem(SCANNING_STORAGE_KEY);
-    if (scanningRaw !== 'true') return;
+    if (scanningRaw !== 'true') {
+      logBreadcrumb('SCAN_FLAG_OFF', String(scanningRaw));
+      return;
+    }
 
     uiListeners.forEach((cb) => cb(loc));
 
@@ -166,7 +177,10 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
       speedKmh = Math.max(0, (loc.coords.speed ?? 0) * 3.6);
     }
 
-    if (updateIdleTracking(speedKmh)) return;
+    if (updateIdleTracking(speedKmh)) {
+      logBreadcrumb('IDLE_SPEED_LOW', `speed=${speedKmh.toFixed(1)}`);
+      return;
+    }
     if (Date.now() < alertCooldownUntil) return;
 
     const [smartAlertsRaw, langRaw] = await Promise.all([
@@ -182,7 +196,10 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
         haversineMeters(latitude, longitude, a.latitude, a.longitude) -
         haversineMeters(latitude, longitude, b.latitude, b.longitude)
     );
-    if (candidates.length === 0) return;
+    if (candidates.length === 0) {
+      logBreadcrumb('NO_POIS_IN_BOX');
+      return;
+    }
 
     let activeAlert = await loadLastAlertMemory();
 
@@ -194,19 +211,41 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
         passedRadarLedger[poi.id] = Date.now();
       }
 
-      if (distance > ALERT_RADIUS_M) continue;
+      if (distance > ALERT_RADIUS_M) {
+        logBreadcrumb('BEYOND_ALERT_RADIUS', `d=${Math.round(distance)}m`);
+        continue;
+      }
 
       const passedAt = passedRadarLedger[poi.id];
-      if (passedAt !== undefined && Date.now() - passedAt < PASSED_RADAR_COOLDOWN_MS) continue;
+      if (passedAt !== undefined && Date.now() - passedAt < PASSED_RADAR_COOLDOWN_MS) {
+        logBreadcrumb('RECENTLY_PASSED');
+        continue;
+      }
 
-      if (heading === null || heading === undefined || heading < 0) continue;
+      if (heading === null || heading === undefined || heading < 0) {
+        logBreadcrumb('HEADING_INVALID', `heading=${String(heading)}`);
+        continue;
+      }
       const bearing = bearingDegrees(latitude, longitude, poi.latitude, poi.longitude);
 
-      if (angularDiff(heading, bearing) > MAX_RELATIVE_BEARING_DEG) continue;
+      const bearingDiff = angularDiff(heading, bearing);
+      if (bearingDiff > MAX_RELATIVE_BEARING_DEG) {
+        logBreadcrumb('ANGLE_MISMATCH', `diff=${Math.round(bearingDiff)} d=${Math.round(distance)}m`);
+        continue;
+      }
 
       const { alongTrackM, crossTrackM } = projectAlongAndCrossTrack(distance, heading, bearing);
-      if (alongTrackM <= 0) continue;
-      if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) continue;
+      if (alongTrackM <= 0) {
+        logBreadcrumb('BEHIND_VEHICLE');
+        continue;
+      }
+      if (Math.abs(crossTrackM) > corridorHalfWidthM(distance)) {
+        logBreadcrumb(
+          'OUTSIDE_CORRIDOR',
+          `cross=${Math.round(Math.abs(crossTrackM))}m limit=${Math.round(corridorHalfWidthM(distance))}m`
+        );
+        continue;
+      }
 
       if (activeAlert) {
         const headingSwing = angularDiff(heading, activeAlert.heading);
@@ -221,11 +260,21 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
             activeAlert.longitude
           );
           const stillFresh = Date.now() - activeAlert.timestamp < ALERT_DEBOUNCE_MS;
-          if (distanceToActive <= TWIN_RADAR_RADIUS_M && stillFresh) continue;
+          if (distanceToActive <= TWIN_RADAR_RADIUS_M && stillFresh) {
+            logBreadcrumb('TWIN_DEBOUNCE');
+            continue;
+          }
         }
       }
 
-      if (shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled)) {
+      const willTrigger = shouldTriggerAlert(poi, speedKmh, smartAlertsEnabled);
+      if (!willTrigger) {
+        logBreadcrumb(
+          'SMART_ALERT_BLOCKED',
+          `maxspeed=${String(poi.maxspeed)} speed=${Math.round(speedKmh)} smart=${smartAlertsEnabled}`
+        );
+      }
+      if (willTrigger) {
         activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
 
         const lang = isAr ? 'ar' : 'en';
@@ -248,6 +297,7 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
           trigger: null,
         });
 
+        logBreadcrumb('ALERT_FIRED', sound);
         alertCooldownUntil = Date.now() + 4000; // replaces the 4-second sleep
         await saveLastAlertMemory(activeAlert);
         break; // one alert per pass
@@ -255,6 +305,7 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
     }
   } catch (err) {
     console.error("Radar Task Error:", err);
+    logBreadcrumb('TASK_EXCEPTION', String(err));
   } finally {
     handlerBusy = false;
   }

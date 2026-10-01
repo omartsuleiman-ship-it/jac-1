@@ -1,9 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { InteractionManager } from 'react-native';
+import { Alert, InteractionManager, Linking } from 'react-native';
 import { subscribeObdSpeed } from '../services/obdSpeedStore';
 import { boundingBoxFilter, getStaticPois, haversineMeters, loadUserPois, type RadarPoi } from '../services/radarService';
+import { clearBreadcrumbs, logBreadcrumb, readBreadcrumbs } from '../tasks/radarBreadcrumbs';
 import {
   invalidatePoiCache,
   isRadarIdle,
@@ -13,9 +14,8 @@ import {
   SCANNING_STORAGE_KEY,
   SMART_ALERTS_STORAGE_KEY,
   stopAndRestoreCurrentSound,
-  stopRadarBackgroundTracking,
   subscribeToRadarLocation,
-  updateIdleTracking,
+  updateIdleTracking
 } from '../tasks/radarLocationTask';
 import { markRadarScanIntent } from '../tasks/radarTaskConstants';
 
@@ -26,6 +26,17 @@ export {
   stopAndRestoreCurrentSound,
   stopRadarBackgroundTracking
 } from '../tasks/radarLocationTask';
+
+let backgroundPermissionAlertShown = false;
+
+// TEMP DEBUG: shown when you press Stop Scan. Remove after diagnosing.
+const showRadarDebugLog = async () => {
+  const lines = await readBreadcrumbs();
+  Alert.alert('Radar debug log', lines.length ? lines.slice(-14).join('\n') : 'No entries yet', [
+    { text: 'Clear', style: 'destructive', onPress: () => { void clearBreadcrumbs(); } },
+    { text: 'Close', style: 'cancel' },
+  ]);
+};
 
 const NEARBY_RADIUS_KM = 5;
 const POI_FETCH_RADIUS_KM = 10;
@@ -157,11 +168,25 @@ function useRadarEngine() {
       setForegroundPermissionGranted(fgStatus === 'granted');
       if (fgStatus !== 'granted') return;
 
-      const { status: bgStatus } = await Location.getBackgroundPermissionsAsync();
+      let bgStatus = (await Location.getBackgroundPermissionsAsync()).status;
       if (bgStatus !== 'granted') {
-        await Location.requestBackgroundPermissionsAsync();
+        bgStatus = (await Location.requestBackgroundPermissionsAsync()).status;
       }
       if (cancelled) return;
+      if (bgStatus !== 'granted') {
+        logBreadcrumb('BG_PERMISSION_NOT_ALWAYS', String(bgStatus));
+        if (!backgroundPermissionAlertShown) {
+          backgroundPermissionAlertShown = true;
+          Alert.alert(
+            'Radar alerts / تنبيهات الرادار',
+            'For radar alerts with the screen off, set Location to "Always" in Settings.\nلتنبيهات الرادار والشاشة مقفولة، اختر الموقع "دائمًا" من الإعدادات.',
+            [
+              { text: 'Cancel / إلغاء', style: 'cancel' },
+              { text: 'Settings / الإعدادات', onPress: () => { Linking.openSettings().catch(() => {}); } },
+            ]
+          );
+        }
+      }
 
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
       if (alreadyRunning || cancelled) return;
@@ -178,12 +203,14 @@ function useRadarEngine() {
           notificationBody: 'Tracking your location for speed camera alerts.',
         },
       });
-    })();
+    })().catch((err) => {
+      logBreadcrumb('START_FAILED', String(err));
+      if (!cancelled) Alert.alert('Radar start failed', String(err));
+    });
 
     return () => {
+      // Only cancel the in-flight start flow. Stopping is done explicitly by stopScanning().
       cancelled = true;
-      stopRadarBackgroundTracking().catch(() => {});
-      stopAndRestoreCurrentSound().catch(() => {});
     };
   }, [isScanning]);
 
@@ -205,6 +232,7 @@ function useRadarEngine() {
     } catch (err) {
       console.warn('[Radar] failed to stop background tracking:', err);
     }
+    void showRadarDebugLog(); // TEMP DEBUG
   }, []);
 
   return {
