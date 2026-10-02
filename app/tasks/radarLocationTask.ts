@@ -15,8 +15,15 @@ import {
 import { logBreadcrumb } from './radarBreadcrumbs';
 import {
   ALERT_MEMORY_STORAGE_KEY,
+  ANNOUNCED_RADARS_STORAGE_KEY,
+  ANNOUNCED_TTL_MS,
+  CLUSTER_RADIUS_M,
   LANGUAGE_STORAGE_KEY,
+  NAG_INTERVAL_MS,
+  NAG_MIN_TRAVEL_M,
+  POST_ALERT_MIN_TRAVEL_M,
   RADAR_LOCATION_TASK,
+  REARM_DISTANCE_M,
   SCANNING_STORAGE_KEY,
   SMART_ALERTS_STORAGE_KEY,
   SPEED_NOISE_GATE_KMH,
@@ -203,6 +210,44 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
 
     let activeAlert = await loadLastAlertMemory();
 
+    // --- Persisted per-radar announcement ledger (distance-based) ---
+    type AnnouncedEntry = { t: number; lat: number; lon: number };
+    type AnnouncedLedger = { radars: Record<string, AnnouncedEntry>; lastFire: AnnouncedEntry | null };
+    let ledger: AnnouncedLedger = { radars: {}, lastFire: null };
+    try {
+      const rawLedger = await AsyncStorage.getItem(ANNOUNCED_RADARS_STORAGE_KEY);
+      if (rawLedger) {
+        const parsed = JSON.parse(rawLedger);
+        if (parsed && typeof parsed === 'object' && parsed.radars) {
+          ledger = { radars: parsed.radars, lastFire: parsed.lastFire ?? null };
+        }
+      }
+    } catch {
+      // Best-effort: fall back to an empty ledger
+    }
+
+    // Re-arm radars we've moved far away from (or whose TTL expired)
+    const nowLedger = Date.now();
+    for (const id of Object.keys(ledger.radars)) {
+      const e = ledger.radars[id];
+      const farAway = haversineMeters(latitude, longitude, e.lat, e.lon) > REARM_DISTANCE_M;
+      if (farAway || nowLedger - e.t > ANNOUNCED_TTL_MS) delete ledger.radars[id];
+    }
+
+    // Distance-based gate: stay silent until we've travelled away from the last fire point.
+    // Smart ON: the gate only blocks NEW (unannounced) radars; overspeed nags may pass through.
+    let postAlertGateActive = false;
+    if (ledger.lastFire) {
+      const travelled = haversineMeters(latitude, longitude, ledger.lastFire.lat, ledger.lastFire.lon);
+      if (travelled < POST_ALERT_MIN_TRAVEL_M && nowLedger - ledger.lastFire.t < ALERT_DEBOUNCE_MS) {
+        if (!smartAlertsEnabled) {
+          logBreadcrumb('POST_ALERT_DISTANCE_GATE', `travelled=${Math.round(travelled)}m`);
+          return;
+        }
+        postAlertGateActive = true;
+      }
+    }
+
     for (const poi of candidates) {
       if (poi.type !== 'radar') continue;
       const distance = haversineMeters(latitude, longitude, poi.latitude, poi.longitude);
@@ -214,6 +259,39 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
       if (distance > ALERT_RADIUS_M) {
         logBreadcrumb('BEYOND_ALERT_RADIUS', `d=${Math.round(distance)}m`);
         continue;
+      }
+
+      const isAnnounced = !!ledger.radars[poi.id];
+      const isNag = isAnnounced && smartAlertsEnabled;
+
+      // Smart OFF: strictly one warning per cluster (unchanged behaviour)
+      if (isAnnounced && !smartAlertsEnabled) {
+        logBreadcrumb('ALREADY_ANNOUNCED', `id=${poi.id}`);
+        continue;
+      }
+
+      // Smart ON: the post-alert gate still silences brand-new radars
+      if (!isAnnounced && postAlertGateActive) {
+        logBreadcrumb('POST_ALERT_GATE_NEW_RADAR', `id=${poi.id}`);
+        continue;
+      }
+
+      // Smart ON + already announced: nag only while speeding, spaced by time OR distance
+      if (isNag) {
+        const nagLimit = poi.maxspeed;
+        if (nagLimit === null || nagLimit === undefined || speedKmh <= nagLimit) {
+          logBreadcrumb('NAG_NOT_SPEEDING', `id=${poi.id} speed=${Math.round(speedKmh)} limit=${String(nagLimit)}`);
+          continue;
+        }
+        const lf = ledger.lastFire;
+        const nagDue =
+          !lf ||
+          Date.now() - lf.t >= NAG_INTERVAL_MS ||
+          haversineMeters(latitude, longitude, lf.lat, lf.lon) >= NAG_MIN_TRAVEL_M;
+        if (!nagDue) {
+          logBreadcrumb('NAG_COOLDOWN', `id=${poi.id}`);
+          continue;
+        }
       }
 
       const passedAt = passedRadarLedger[poi.id];
@@ -247,7 +325,7 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
         continue;
       }
 
-      if (activeAlert) {
+      if (activeAlert && !isNag) {
         const headingSwing = angularDiff(heading, activeAlert.heading);
         const isUTurn = headingSwing > U_TURN_HEADING_DELTA_DEG;
         if (isUTurn) {
@@ -276,6 +354,25 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
       }
       if (willTrigger) {
         activeAlert = { id: poi.id, latitude: poi.latitude, longitude: poi.longitude, heading, timestamp: Date.now() };
+
+        // Mark this radar AND every radar in its cluster (any direction) as announced,
+        // and persist BEFORE scheduling the notification so re-entrant runs see it.
+        const fireNow = Date.now();
+        for (const other of candidates) {
+          if (other.type !== 'radar') continue;
+          if (
+            other.id === poi.id ||
+            haversineMeters(poi.latitude, poi.longitude, other.latitude, other.longitude) <= CLUSTER_RADIUS_M
+          ) {
+            ledger.radars[other.id] = { t: fireNow, lat: other.latitude, lon: other.longitude };
+          }
+        }
+        ledger.lastFire = { t: fireNow, lat: latitude, lon: longitude };
+        try {
+          await AsyncStorage.setItem(ANNOUNCED_RADARS_STORAGE_KEY, JSON.stringify(ledger));
+        } catch {
+          // Best-effort
+        }
 
         const lang = isAr ? 'ar' : 'en';
         const SUPPORTED = [40, 50, 60, 70, 80, 90, 100, 120];
