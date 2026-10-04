@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Alert, InteractionManager, Linking } from 'react-native';
+import { Alert, AppState, InteractionManager, Linking, Platform } from 'react-native';
 import { subscribeObdSpeed } from '../services/obdSpeedStore';
 import { boundingBoxFilter, getStaticPois, haversineMeters, loadUserPois, type RadarPoi } from '../services/radarService';
 import { clearBreadcrumbs, logBreadcrumb, readBreadcrumbs } from '../tasks/radarBreadcrumbs';
@@ -169,13 +169,14 @@ function useRadarEngine() {
       if (fgStatus !== 'granted') return;
 
       let bgStatus = (await Location.getBackgroundPermissionsAsync()).status;
-      if (bgStatus !== 'granted') {
+      // iOS "While Using" mode: never ask for "Always". Android still needs the background request.
+      if (bgStatus !== 'granted' && Platform.OS !== 'ios') {
         bgStatus = (await Location.requestBackgroundPermissionsAsync()).status;
       }
       if (cancelled) return;
       if (bgStatus !== 'granted') {
         logBreadcrumb('BG_PERMISSION_NOT_ALWAYS', String(bgStatus));
-        if (!backgroundPermissionAlertShown) {
+        if (Platform.OS !== 'ios' && !backgroundPermissionAlertShown) {
           backgroundPermissionAlertShown = true;
           Alert.alert(
             'Radar alerts / تنبيهات الرادار',
@@ -188,8 +189,15 @@ function useRadarEngine() {
         }
       }
 
+      logBreadcrumb('START_FLOW', `appState=${AppState.currentState} platform=${Platform.OS}`);
       const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => false);
-      if (alreadyRunning || cancelled) return;
+      if (cancelled) return;
+      if (alreadyRunning) {
+        // A leftover registration was not started in THIS foreground session. On iOS, restart it.
+        if (Platform.OS !== 'ios') return;
+        await Location.stopLocationUpdatesAsync(RADAR_LOCATION_TASK).catch(() => {});
+        if (cancelled) return;
+      }
 
       await Location.startLocationUpdatesAsync(RADAR_LOCATION_TASK, {
         accuracy: Location.Accuracy.BestForNavigation,
@@ -213,6 +221,14 @@ function useRadarEngine() {
       cancelled = true;
     };
   }, [isScanning]);
+
+  // Diagnostic: shows in the breadcrumb log whether TASK_INVOKED keeps firing after the app is backgrounded
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      logBreadcrumb('APPSTATE', state);
+    });
+    return () => sub.remove();
+  }, []);
 
   const startScanning = useCallback(() => {
     markRadarScanIntent();
