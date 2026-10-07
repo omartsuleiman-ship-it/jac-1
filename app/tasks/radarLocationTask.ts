@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import type { TaskManagerTaskBody } from 'expo-task-manager';
+import { AppState } from 'react-native';
 import { getObdSpeedKmh } from '../services/obdSpeedStore';
 import {
   type RadarPoi,
@@ -174,7 +175,10 @@ export const handleRadarLocationTask = async ({ data, error }: TaskManagerTaskBo
       return;
     }
 
-    uiListeners.forEach((cb) => cb(loc));
+    // نبلغ الشاشة بتغيير اللوكيشن فقط لو التطبيق مفتوح عشان نمنع ريندر الخريطة في الخلفية
+    if (AppState.currentState === 'active') {
+      uiListeners.forEach((cb) => cb(loc));
+    }
 
     const { latitude, longitude, heading } = loc.coords;
 

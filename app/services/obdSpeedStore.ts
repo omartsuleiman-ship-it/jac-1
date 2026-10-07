@@ -2,6 +2,8 @@
 // (useRadarWatchdog.tsx). أي كود يقرأ من الـ OBD2 (PID 01 0D) ينادي
 // setObdSpeedKmh() كل ما توصله قراءة جديدة — من غير أي حاجة تستنى
 // (non-blocking تمامًا، مجرد تحديث متغيّر + نداء المستمعين).
+import { AppState } from 'react-native';
+
 type ObdSpeedListener = (kmh: number) => void;
 
 let currentSpeedKmh = 0;
@@ -16,6 +18,8 @@ const DASHBOARD_OFFSET_FACTOR = 1.05;
 
 export const setObdSpeedKmh = (kmh: number) => {
   currentSpeedKmh = kmh * DASHBOARD_OFFSET_FACTOR;
+  // القيمة هتتحدث في الخلفية عادي، لكن مش هنبلغ الشاشة بيها غير لو التطبيق مفتوح
+  if (AppState.currentState !== 'active') return;
   listeners.forEach((cb) => cb(currentSpeedKmh));
 };
 
