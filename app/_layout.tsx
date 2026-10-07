@@ -7,11 +7,13 @@ import { useEffect } from 'react';
 import { AppState, InteractionManager } from 'react-native';
 import 'react-native-reanimated';
 
+
 // 👇 ضفنا مكتبة سينتري هنا
 import * as Sentry from '@sentry/react-native';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { RADAR_LOCATION_TASK, SCANNING_STORAGE_KEY, shouldSkipBootScanReset } from './tasks/radarTaskConstants';
+import { ensureRefreshReminder } from './tasks/refreshReminder';
 
 // Evaluated once at bundle load. iOS reports 'background' when it relaunched the app headlessly.
 const LAUNCHED_IN_BACKGROUND = AppState.currentState === 'background';
@@ -48,6 +50,11 @@ export const unstable_settings = {
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   const router = useRouter(); // 👈 تفعيل الراوتر
+
+  // إشعار الـ 6 أيام لتجديد التطبيق (Sideloading)
+  useEffect(() => {
+    void ensureRefreshReminder();
+  }, []);
 
   useEffect(() => {
     const handle = InteractionManager.runAfterInteractions(() => {

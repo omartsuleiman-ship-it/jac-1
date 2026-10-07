@@ -1,8 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
-import { Alert } from 'react-native';
+import { Alert, AppState } from 'react-native';
 import { BleManager, Characteristic, Device } from 'react-native-ble-plx';
-import { setObdSpeedKmh } from './obdSpeedStore';
+import { getObdSpeedKmh, setObdSpeedKmh } from './obdSpeedStore';
 import { STORAGE_KEY_LAST_PARKED } from './storageKeys';
 export { STORAGE_KEY_LAST_PARKED } from './storageKeys';
 
@@ -297,6 +297,31 @@ const captureLastParkedLocation = async (): Promise<void> => {
   }
 };
 
+const LAST_PARKED_DEBOUNCE_MS = 10000;
+const LAST_PARKED_MAX_SPEED_KMH = 10; // last OBD speed above this = dropout while driving, not parking
+let parkedCaptureTimer: ReturnType<typeof setTimeout> | null = null;
+
+const cancelPendingParkedCapture = () => {
+  if (parkedCaptureTimer) {
+    clearTimeout(parkedCaptureTimer);
+    parkedCaptureTimer = null;
+    console.log('[BLE] Pending last-parked capture cancelled (reconnected)');
+  }
+};
+
+const scheduleLastParkedCapture = () => {
+  if (parkedCaptureTimer) clearTimeout(parkedCaptureTimer);
+  parkedCaptureTimer = setTimeout(() => {
+    parkedCaptureTimer = null;
+    const lastSpeed = getObdSpeedKmh();
+    if (lastSpeed > LAST_PARKED_MAX_SPEED_KMH) {
+      console.log(`[BLE] Last-parked skipped: last OBD speed ${Math.round(lastSpeed)} km/h (dropout while driving)`);
+      return;
+    }
+    void captureLastParkedLocation();
+  }, LAST_PARKED_DEBOUNCE_MS);
+};
+
 // ── Dynamically find the UART TX/RX characteristic instead of trusting a hardcoded UUID ──
 const discoverOBDCharacteristic = async (
   device: Device
@@ -351,14 +376,14 @@ const discoverOBDCharacteristic = async (
 
 // ── Set the connected device after successful connection ──
 export const setOBDDevice = async (device: Device) => {
+cancelPendingParkedCapture();
   connectedDevice = device;
 
-  // Fires on ANY disconnect — manual (disconnectBleDevice) or unexpected
-  // (dongle lost power / went out of range, e.g. the car was just turned off)
+  // Fires on ANY disconnect
   disconnectSubscription?.remove();
   disconnectSubscription = device.onDisconnected(() => {
     console.log('[BLE] Device disconnected — capturing last-parked location');
-    captureLastParkedLocation();
+    scheduleLastParkedCapture();
     stopObdSpeedPolling();
     connectedDevice = null;
     writeCharacteristic = null;
@@ -453,7 +478,7 @@ export const disconnectBleDevice = async (deviceId: string) => {
     // cancelDeviceConnection() resolving isn't guaranteed across platforms.
     // A harmless duplicate write from the listener firing shortly after is
     // fine; a missed one isn't.
-    captureLastParkedLocation();
+    scheduleLastParkedCapture();
     stopObdSpeedPolling();
 
     disconnectSubscription?.remove();
@@ -757,6 +782,7 @@ const requestPID = async (pid: string): Promise<number | null> => {
 // OBD فعلي لسه بيعدي من نفس طابور sendOBDCommand -> queueRawCommand بتاع
 // باقي الملف، يعني مستحيل يتعارض مع RPM/coolant/voltage أو أي فحص أعطال.
 const OBD_SPEED_POLL_INTERVAL_MS = 300;
+const OBD_SPEED_POLL_INTERVAL_BG_MS = 1000;
 let speedPollingActive = false;
 let speedPollTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -776,7 +802,9 @@ const speedPollTick = async () => {
   }
 
   if (speedPollingActive) {
-    speedPollTimeout = setTimeout(speedPollTick, OBD_SPEED_POLL_INTERVAL_MS);
+    const nextDelayMs =
+      AppState.currentState === 'active' ? OBD_SPEED_POLL_INTERVAL_MS : OBD_SPEED_POLL_INTERVAL_BG_MS;
+    speedPollTimeout = setTimeout(speedPollTick, nextDelayMs);
   }
 };
 

@@ -123,8 +123,10 @@ function useRadarEngine() {
 
   useEffect(() => {
     const unsubscribe = subscribeObdSpeed((kmh) => {
-      setSpeedKmh(kmh);
       const idleNow = updateIdleTracking(kmh);
+      // منع تحديث الواجهة (UI) والشاشة مقفولة
+      if (AppState.currentState !== 'active') return;
+      setSpeedKmh(kmh);
       if (idleNow !== isIdleRef.current) {
         isIdleRef.current = idleNow;
         setIsIdle(idleNow);
@@ -135,9 +137,11 @@ function useRadarEngine() {
 
   useEffect(() => {
     const unsubscribe = subscribeToRadarLocation((loc) => {
-      setLocation(loc);
       const { latitude, longitude } = loc.coords;
       lastLocationRef.current = { latitude, longitude };
+      // منع تحديث الواجهة (UI) الشاشة مقفولة، بينما الرادار شغال في الخلفية
+      if (AppState.currentState !== 'active') return;
+      setLocation(loc);
       if (isRadarIdle()) return;
 
       const center = lastFetchCenterRef.current;
